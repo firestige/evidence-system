@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-evidence-system 是 Agent Ops Ledger 的 Evidence System —— 一个可选、可独立部署的本地应用：它接收 Execution 发出的受支持 OTLP 事实，建立真实可信的因果与事实投影，并供人检查，但不控制执行。Evidence 或遥测不可用时，Execution 仍会继续。
+evidence-system 是 workflow-self-recursive 的 Evidence System —— 一个可选、可独立部署的本地应用：它接收 Execution 发出的受支持 OTLP 事实，建立真实可信的因果与事实投影，并供人检查，但不控制执行。Evidence 或遥测不可用时，Execution 仍会继续。
 
 三个 Module 分离关注点：
 
@@ -14,11 +14,11 @@ evidence-system 是 Agent Ops Ledger 的 Evidence System —— 一个可选、�
 
 ## Developer preview
 
-本仓库是 Agent Ops Ledger 架构优先开发者预览版的一部分，适用于个人或小团队的可信本地环境。当前发布 Evidence 设计与组件边界，尚未提供可供最终用户运行的发行版。**后续会有破坏兼容性的变更。**
+本仓库是 workflow-self-recursive 架构优先开发者预览版的一部分，适用于个人或小团队的可信本地环境。当前发布 Evidence 设计与组件边界，尚未提供可供最终用户运行的发行版。**后续会有破坏兼容性的变更。**
 
 ## 获取源码
 
-本仓库通常作为 [Agent Ops Ledger](https://github.com/firestige/workflow-self-recursive) 的 submodule 使用：
+本仓库通常作为 [workflow-self-recursive](https://github.com/firestige/workflow-self-recursive) 的 submodule 使用：
 
 ```sh
 git clone --recurse-submodules https://github.com/firestige/workflow-self-recursive.git

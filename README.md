@@ -2,7 +2,7 @@
 
 English | [中文](README.zh-CN.md)
 
-evidence-system is the Evidence System of Agent Ops Ledger — an optional, separately deployable local application that accepts supported OTLP facts from Execution, projects truthful causal and factual views, and serves human inspection without controlling execution. Execution continues when Evidence or telemetry is unavailable.
+evidence-system is the Evidence System of workflow-self-recursive — an optional, separately deployable local application that accepts supported OTLP facts from Execution, projects truthful causal and factual views, and serves human inspection without controlling execution. Execution continues when Evidence or telemetry is unavailable.
 
 Three modules separate the concerns:
 
@@ -14,11 +14,11 @@ The first release runs as one local Evidence App, one PostgreSQL database, and G
 
 ## Developer preview
 
-This repository is part of Agent Ops Ledger's architecture-first developer preview for trusted local use by individuals and small teams. It publishes the Evidence design and component boundaries; it does not yet provide a runnable end-user release. **THERE WILL BE COMPATIBILITY-BREAKING CHANGES.**
+This repository is part of workflow-self-recursive's architecture-first developer preview for trusted local use by individuals and small teams. It publishes the Evidence design and component boundaries; it does not yet provide a runnable end-user release. **THERE WILL BE COMPATIBILITY-BREAKING CHANGES.**
 
 ## Get the source
 
-This repository is normally consumed as a submodule of [Agent Ops Ledger](https://github.com/firestige/workflow-self-recursive):
+This repository is normally consumed as a submodule of [workflow-self-recursive](https://github.com/firestige/workflow-self-recursive):
 
 ```sh
 git clone --recurse-submodules https://github.com/firestige/workflow-self-recursive.git
