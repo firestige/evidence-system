@@ -19,7 +19,7 @@ services:
       dockerfile: deployment/Dockerfile
     command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
     environment:
-      WSR_EVIDENCE_DATABASE_URL: postgresql+psycopg://wsr_evidence@database/wsr_evidence
+      WSR_EVIDENCE_DATABASE_URL: postgresql://wsr_evidence@database/wsr_evidence
     depends_on:
       database:
         condition: service_healthy
