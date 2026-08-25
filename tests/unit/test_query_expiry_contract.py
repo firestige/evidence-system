@@ -1,0 +1,184 @@
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+from wsr_evidence.storage.read_model import (
+    DEFAULT_FACTUAL_PROJECTION_TTL,
+    DEFAULT_PAGE_LIMIT,
+    DEFAULT_RAW_DEBUG_TTL,
+    DEFAULT_RETENTION_BATCH_SIZE,
+    DEFAULT_RETENTION_INTERVAL,
+    DEFAULT_SNAPSHOT_LEASE_LIMIT,
+    DEFAULT_SNAPSHOT_LEASE_TTL,
+    DEFAULT_TRACE_DETAIL_TTL,
+    MAX_PAGE_LIMIT,
+    QUERY_CONTRACT_REVISION,
+    RETENTION_POLICY_REVISION,
+    Availability,
+    Completeness,
+    ExpiryBatch,
+    ExpiryResult,
+    ExpiryState,
+    QueryExpiryReadModel,
+    ResourceClass,
+    RetentionPolicy,
+    SnapshotPage,
+    TruthState,
+)
+
+
+def test_wave6_versions_and_defaults_are_exact() -> None:
+    assert QUERY_CONTRACT_REVISION == "0.1.0"
+    assert RETENTION_POLICY_REVISION == "1.0.0"
+    assert DEFAULT_PAGE_LIMIT == 100
+    assert MAX_PAGE_LIMIT == 200
+    assert timedelta(seconds=60) == DEFAULT_SNAPSHOT_LEASE_TTL
+    assert DEFAULT_SNAPSHOT_LEASE_LIMIT == 4
+    assert timedelta(0) == DEFAULT_RAW_DEBUG_TTL
+    assert timedelta(days=30) == DEFAULT_TRACE_DETAIL_TTL
+    assert timedelta(days=365) == DEFAULT_FACTUAL_PROJECTION_TTL
+    assert DEFAULT_RETENTION_BATCH_SIZE == 500
+    assert timedelta(seconds=60) == DEFAULT_RETENTION_INTERVAL
+
+
+def test_truth_state_preserves_completeness_and_distinguishes_expiry() -> None:
+    final_zero = TruthState(
+        completeness=Completeness.FINAL,
+        availability=Availability.AVAILABLE,
+        expiry=ExpiryState.ACTIVE,
+        expires_at=datetime(2026, 9, 25, tzinfo=UTC),
+    )
+    expired_final = TruthState(
+        completeness=Completeness.FINAL,
+        availability=Availability.UNAVAILABLE,
+        expiry=ExpiryState.EXPIRED,
+        expires_at=datetime(2026, 9, 25, tzinfo=UTC),
+    )
+
+    assert final_zero.completeness is Completeness.FINAL
+    assert expired_final.completeness is Completeness.FINAL
+    assert expired_final.expiry is ExpiryState.EXPIRED
+
+
+@pytest.mark.parametrize(
+    ("completeness", "availability", "expiry"),
+    [
+        (Completeness.FINAL, Availability.UNAVAILABLE, ExpiryState.ACTIVE),
+        (Completeness.LOWER_BOUND, Availability.UNAVAILABLE, ExpiryState.ACTIVE),
+        (Completeness.NOT_APPLICABLE, Availability.UNAVAILABLE, ExpiryState.ACTIVE),
+        (Completeness.UNAVAILABLE, Availability.AVAILABLE, ExpiryState.ACTIVE),
+        (None, Availability.AVAILABLE, ExpiryState.EXPIRED),
+    ],
+)
+def test_truth_state_rejects_combinations_that_rewrite_truth(
+    completeness: Completeness | None,
+    availability: Availability,
+    expiry: ExpiryState,
+) -> None:
+    with pytest.raises(ValueError):
+        TruthState(
+            completeness=completeness,
+            availability=availability,
+            expiry=expiry,
+            expires_at=None,
+        )
+
+
+def test_retention_policy_defaults_keep_accepted_provenance_forever() -> None:
+    policy = RetentionPolicy()
+
+    assert policy.revision == "1.0.0"
+    assert policy.raw_debug_ttl == timedelta(0)
+    assert policy.accepted_provenance_ttl is None
+    assert policy.trace_detail_ttl == timedelta(days=30)
+    assert policy.factual_projection_ttl == timedelta(days=365)
+    assert policy.batch_size == 500
+    assert policy.interval == timedelta(seconds=60)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"raw_debug_ttl": timedelta(days=1, seconds=1)},
+        {"trace_detail_ttl": timedelta(hours=23)},
+        {"trace_detail_ttl": timedelta(days=366)},
+        {"factual_projection_ttl": timedelta(days=29)},
+        {"factual_projection_ttl": timedelta(days=3651)},
+        {"batch_size": 0},
+        {"batch_size": 1001},
+        {"interval": timedelta(seconds=9)},
+        {"interval": timedelta(seconds=3601)},
+    ],
+)
+def test_retention_policy_rejects_out_of_range_values(overrides: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        RetentionPolicy(**overrides)  # type: ignore[arg-type]
+
+
+def test_expiry_batch_identity_is_canonical_and_rejects_duplicates() -> None:
+    cutoff = datetime(2026, 8, 26, tzinfo=UTC)
+    first = ExpiryBatch.create(
+        resource_class=ResourceClass.TRACE_DETAIL,
+        policy_revision="1.0.0",
+        cutoff=cutoff,
+        owner_keys=(("trace-b",), ("trace-a",)),
+    )
+    second = ExpiryBatch.create(
+        resource_class=ResourceClass.TRACE_DETAIL,
+        policy_revision="1.0.0",
+        cutoff=cutoff,
+        owner_keys=(("trace-a",), ("trace-b",)),
+    )
+
+    assert first == second
+    assert first.owner_keys == (("trace-a",), ("trace-b",))
+    assert len(first.batch_identity) == 64
+
+    with pytest.raises(ValueError):
+        ExpiryBatch.create(
+            resource_class=ResourceClass.TRACE_DETAIL,
+            policy_revision="1.0.0",
+            cutoff=cutoff,
+            owner_keys=(("trace-a",), ("trace-a",)),
+        )
+
+
+def test_accepted_provenance_cannot_be_planned_for_expiry() -> None:
+    with pytest.raises(ValueError):
+        ExpiryBatch.create(
+            resource_class=ResourceClass.ACCEPTED_PROVENANCE,
+            policy_revision="1.0.0",
+            cutoff=datetime(2026, 8, 26, tzinfo=UTC),
+            owner_keys=(),
+        )
+
+
+def test_expiry_result_requires_an_exact_partition() -> None:
+    result = ExpiryResult(
+        batch_identity="a" * 64,
+        selected=3,
+        expired=2,
+        already_expired=1,
+    )
+    assert result.expired + result.already_expired == result.selected
+
+    with pytest.raises(ValueError):
+        ExpiryResult(
+            batch_identity="a" * 64,
+            selected=3,
+            expired=1,
+            already_expired=1,
+        )
+
+
+def test_snapshot_page_and_read_model_protocol_are_runtime_checkable() -> None:
+    page: SnapshotPage[str] = SnapshotPage(
+        contract_revision="0.1.0",
+        read_model_revision="1.0.0",
+        snapshot_id="snapshot-1",
+        resources=("resource-1",),
+        next_cursor=None,
+    )
+
+    assert page.resources == ("resource-1",)
+    assert QueryExpiryReadModel is not None
