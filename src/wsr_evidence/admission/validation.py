@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from decimal import Decimal
 from hashlib import sha256
 from typing import Any, cast
 
@@ -259,6 +260,7 @@ IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$")
 DIGEST = re.compile(r"^[a-f0-9]{64}$")
 TRACE_ID = re.compile(r"^[a-f0-9]{32}$")
 SPAN_ID = re.compile(r"^[a-f0-9]{16}$")
+NANOSECONDS = re.compile(r"^(0|[1-9][0-9]{0,19})$")
 
 
 class ValidationError(ValueError):
@@ -266,7 +268,51 @@ class ValidationError(ValueError):
 
 
 def canonical_bytes(value: Any) -> bytes:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    return _canonical_text(value).encode()
+
+
+def _canonical_number(value: float) -> str:
+    if not math.isfinite(value):
+        raise ValueError("canonical JSON prohibits non-finite numbers")
+    if value == 0:
+        return "0"
+    encoded = repr(value).lower()
+    magnitude = abs(value)
+    if 1e-6 <= magnitude < 1e21:
+        if "e" in encoded:
+            return format(Decimal(encoded), "f")
+        return encoded.removesuffix(".0")
+    if "e" not in encoded:
+        return encoded.removesuffix(".0")
+    mantissa, exponent = encoded.split("e")
+    mantissa = mantissa.removesuffix(".0")
+    exponent_value = int(exponent)
+    exponent_text = f"+{exponent_value}" if exponent_value >= 0 else str(exponent_value)
+    return f"{mantissa}e{exponent_text}"
+
+
+def _canonical_text(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return _canonical_number(value)
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(value, list | tuple):
+        return "[" + ",".join(_canonical_text(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return (
+            "{"
+            + ",".join(
+                f"{_canonical_text(key)}:{_canonical_text(value[key])}" for key in sorted(value)
+            )
+            + "}"
+        )
+    raise TypeError(f"unsupported canonical JSON type: {type(value).__name__}")
 
 
 def canonical_digest(value: Any) -> str:
@@ -331,20 +377,76 @@ def _validate_span(record: dict[str, Any], attributes: dict[str, Any]) -> None:
     )
     _require(required <= set(record), "incomplete Span shape")
     _require("event_name" not in record, "event_name prohibited on Span")
-    _require(TRACE_ID.fullmatch(record["trace_id"]) is not None, "invalid trace_id")
-    _require(SPAN_ID.fullmatch(record["span_id"]) is not None, "invalid span_id")
+    _require(
+        isinstance(record["span_name"], str) and 1 <= len(record["span_name"]) <= 128,
+        "invalid span_name",
+    )
+    _require(
+        isinstance(record["trace_id"], str) and TRACE_ID.fullmatch(record["trace_id"]) is not None,
+        "invalid trace_id",
+    )
+    _require(
+        isinstance(record["span_id"], str) and SPAN_ID.fullmatch(record["span_id"]) is not None,
+        "invalid span_id",
+    )
     if "parent_span_id" in record:
-        _require(SPAN_ID.fullmatch(record["parent_span_id"]) is not None, "invalid parent_span_id")
+        _require(
+            isinstance(record["parent_span_id"], str)
+            and SPAN_ID.fullmatch(record["parent_span_id"]) is not None,
+            "invalid parent_span_id",
+        )
     _require(record["span_kind"] in {"INTERNAL", "CLIENT"}, "invalid Span kind")
     _require(record["span_status"] in {"UNSET", "OK", "ERROR"}, "invalid Span status")
+    for field in ("start_time_unix_nano", "end_time_unix_nano"):
+        _require(
+            isinstance(record[field], str) and NANOSECONDS.fullmatch(record[field]) is not None,
+            f"invalid {field}",
+        )
     _require(
         int(record["end_time_unix_nano"]) >= int(record["start_time_unix_nano"]),
         "Span end precedes start",
     )
     _require(
+        isinstance(record["span_flags"], int)
+        and not isinstance(record["span_flags"], bool)
+        and 0 <= record["span_flags"] <= 0xFFFFFFFF,
+        "invalid Span flags",
+    )
+    if "trace_state" in record:
+        _require(
+            isinstance(record["trace_state"], str) and len(record["trace_state"]) <= 512,
+            "invalid trace_state",
+        )
+    _require(
         isinstance(record["span_links"], list) and len(record["span_links"]) <= 128,
         "invalid Span links",
     )
+    for link in record["span_links"]:
+        _require(
+            isinstance(link, dict)
+            and {"trace_id", "span_id"} <= set(link)
+            and set(link) <= {"trace_id", "span_id", "trace_state", "flags"},
+            "invalid Span link shape",
+        )
+        _require(
+            isinstance(link["trace_id"], str)
+            and TRACE_ID.fullmatch(link["trace_id"]) is not None
+            and isinstance(link["span_id"], str)
+            and SPAN_ID.fullmatch(link["span_id"]) is not None,
+            "invalid Span link identity",
+        )
+        if "trace_state" in link:
+            _require(
+                isinstance(link["trace_state"], str) and len(link["trace_state"]) <= 512,
+                "invalid Span link trace_state",
+            )
+        if "flags" in link:
+            _require(
+                isinstance(link["flags"], int)
+                and not isinstance(link["flags"], bool)
+                and 0 <= link["flags"] <= 0xFFFFFFFF,
+                "invalid Span link flags",
+            )
     disallowed = {name for name in attributes if name.startswith("agentops.")} - SPAN_ALLOWED
     if disallowed:
         raise ValidationError(f"{sorted(disallowed)[0]} prohibited on Span")
@@ -352,16 +454,50 @@ def _validate_span(record: dict[str, Any], attributes: dict[str, Any]) -> None:
     root_fields = _set(
         "agentops.delivery.id agentops.workflow.id agentops.workflow.version agentops.implementation.id agentops.runtime.id agentops.manifest.digest agentops.workflow.family"
     )
+    root_only = root_fields - {"agentops.runtime.id"}
     if delivery_root:
         _require(root_fields <= set(attributes), "incomplete Delivery root")
         _require(record["span_kind"] == "INTERNAL", "Delivery root must use INTERNAL Span kind")
+    else:
+        _require(
+            not (root_only & set(attributes)), "Delivery-root field outside Delivery root Span"
+        )
     operation = attributes.get("gen_ai.operation.name")
+    if operation == "invoke_agent":
+        _require("gen_ai.agent.id" in attributes, "incomplete Agent Span")
+        _require(record["span_kind"] == "INTERNAL", "Agent Span must use INTERNAL kind")
     if operation in {"chat", "generate_content"}:
         _require(
             _set("gen_ai.provider.name gen_ai.request.model") <= set(attributes),
             "incomplete model Span",
         )
         _require(record["span_kind"] == "CLIENT", "model Span must use CLIENT kind")
+    if operation == "execute_tool":
+        _require(
+            _set("gen_ai.tool.name gen_ai.tool.type gen_ai.tool.call.id") <= set(attributes),
+            "incomplete tool Span",
+        )
+        _require(record["span_kind"] == "INTERNAL", "tool Span must use INTERNAL kind")
+    standard_by_operation = {
+        "invoke_agent": _set(
+            "gen_ai.operation.name gen_ai.agent.id gen_ai.agent.name gen_ai.agent.version error.type"
+        ),
+        "chat": _set(
+            "gen_ai.operation.name gen_ai.provider.name gen_ai.request.model gen_ai.response.model gen_ai.usage.input_tokens gen_ai.usage.output_tokens error.type"
+        ),
+        "generate_content": _set(
+            "gen_ai.operation.name gen_ai.provider.name gen_ai.request.model gen_ai.response.model gen_ai.usage.input_tokens gen_ai.usage.output_tokens error.type"
+        ),
+        "execute_tool": _set(
+            "gen_ai.operation.name gen_ai.tool.name gen_ai.tool.type gen_ai.tool.call.id error.type"
+        ),
+    }
+    operation_name = operation if isinstance(operation, str) else ""
+    permitted_standard = standard_by_operation.get(operation_name, {"error.type"})
+    standard_present = {name for name in attributes if not name.startswith("agentops.")}
+    _require(
+        not (standard_present - permitted_standard), "standard field prohibited for Span operation"
+    )
     if "agentops.model.id" in attributes:
         _require(
             operation in {"chat", "generate_content"}, "model identity outside model-call Span"
@@ -381,6 +517,17 @@ def _validate_event(record: dict[str, Any], attributes: dict[str, Any]) -> None:
         "span_name span_kind start_time_unix_nano end_time_unix_nano parent_span_id trace_state span_flags span_links span_status"
     )
     _require(not (span_fields & set(record)), "Span field prohibited on Event")
+    if "trace_id" in record:
+        _require(
+            isinstance(record["trace_id"], str)
+            and TRACE_ID.fullmatch(record["trace_id"]) is not None,
+            "invalid Event trace_id",
+        )
+    if "span_id" in record:
+        _require(
+            isinstance(record["span_id"], str) and SPAN_ID.fullmatch(record["span_id"]) is not None,
+            "invalid Event span_id",
+        )
     _require(
         not ({name for name in attributes if not name.startswith("agentops.")}),
         "standard Span attribute on Event",
@@ -397,6 +544,15 @@ def _validate_event(record: dict[str, Any], attributes: dict[str, Any]) -> None:
             (family, schema)
             in {("implementation", "implementation@1"), ("system-design", "system-design@1")},
             "family/schema mismatch",
+        )
+    if event_name == "implementation.summary":
+        _require(schema == "implementation@1", "family-specific EventName mismatch")
+    if event_name == "system_design.summary":
+        _require(schema == "system-design@1", "family-specific EventName mismatch")
+    if event_name == "usage" and attributes["agentops.usage.kind"] == "money":
+        _require(
+            re.fullmatch(r"[A-Z]{3}", attributes["agentops.usage.unit"]) is not None,
+            "money usage unit must be ISO-4217 currency",
         )
     if "agentops.review.scope" in attributes:
         _require(
@@ -425,6 +581,21 @@ def _validate_event(record: dict[str, Any], attributes: dict[str, Any]) -> None:
             )
         else:
             _require("agentops.iteration.id" not in attributes, "C27 prohibited outside recheck")
+    if event_name == "review.summary":
+        fresh_reader_fields = {
+            "agentops.fresh_reader.result",
+            "agentops.fresh_reader.finding.count",
+        }
+        if attributes["agentops.review.lens"] == "FRESH_READER":
+            _require(
+                schema == "system-design@1" and fresh_reader_fields <= set(attributes),
+                "incomplete Fresh Reader summary",
+            )
+        else:
+            _require(
+                not (fresh_reader_fields & set(attributes)),
+                "Fresh Reader field outside Fresh Reader summary",
+            )
     if event_name == "implementation.summary":
         _require(
             attributes["agentops.coverage.covered"] <= attributes["agentops.coverage.total"],

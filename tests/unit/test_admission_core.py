@@ -8,7 +8,11 @@ from typing import Any
 import pytest
 
 from wsr_evidence.admission.service import AdmissionService, Disposition
-from wsr_evidence.admission.validation import ValidationError, validate_record
+from wsr_evidence.admission.validation import (
+    ValidationError,
+    canonical_digest,
+    validate_record,
+)
 from wsr_evidence.projection.effects import ProjectionEffect
 
 
@@ -95,6 +99,69 @@ def test_exact_profile_rejects_unknown_and_sibling_family_fields() -> None:
         validate_record(sibling)
 
 
+def test_family_specific_summary_and_fresh_reader_shapes_are_closed() -> None:
+    implementation = {
+        "profile_version": "1.0.0",
+        "record_type": "event",
+        "event_name": "implementation.summary",
+        "resource": {"service.name": "dsh", "service.version": "1"},
+        "scope": {
+            "name": "io.agentops.dsh.observation",
+            "version": "1.0.0",
+            "schema_url": "https://opentelemetry.io/schemas/1.41.0",
+        },
+        "attributes": {
+            "agentops.event.id": "implementation-1",
+            "agentops.workflow.family": "system-design",
+            "agentops.family.schema": "system-design@1",
+            "agentops.summary.state": "FINAL",
+            "agentops.artifact.id": "report-1",
+            "agentops.artifact.digest": "a" * 64,
+            "agentops.coverage.dimension": "line",
+            "agentops.coverage.covered": 10,
+            "agentops.coverage.total": 10,
+            "agentops.coverage.scope": "src",
+            "agentops.coverage.tool.id": "coverage-tool",
+            "agentops.coverage.format": "coverage-json",
+        },
+    }
+    with pytest.raises(ValidationError, match="family-specific EventName"):
+        validate_record(implementation)
+
+    fresh_reader = finding_record()
+    fresh_reader["event_name"] = "review.summary"
+    attributes = fresh_reader["attributes"]
+    for name in (
+        "agentops.review.severity",
+        "agentops.finding.id",
+        "agentops.finding.status",
+        "agentops.source.review.id",
+        "agentops.finding.summary",
+        "agentops.finding.scope.id",
+        "agentops.finding.target.kind",
+        "agentops.finding.target.id",
+    ):
+        attributes.pop(name)
+    attributes["agentops.summary.state"] = "FINAL"
+    attributes["agentops.review.lens"] = "FRESH_READER"
+    attributes["agentops.workflow.family"] = "system-design"
+    attributes["agentops.family.schema"] = "system-design@1"
+    with pytest.raises(ValidationError, match="Fresh Reader"):
+        validate_record(fresh_reader)
+
+
+def test_rfc8785_reference_digest_vector_is_stable() -> None:
+    assert canonical_digest({"b": 2, "a": 1}) == (
+        "43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
+    )
+
+
+def test_canonical_digest_matches_frozen_javascript_number_serialization() -> None:
+    assert canonical_digest({"z": 1e-7, "a": 1.0, "b": -0.0, "c": 1e20}) == (
+        "f4e15fe240a9fa9acc1677d5faaccf8b3378b9754634035967232cb19cc6992f"
+    )
+
+
 def test_finding_summary_is_verbatim_bounded_and_not_inferred() -> None:
     record = finding_record()
     validated = validate_record(record)
@@ -155,3 +222,69 @@ def test_finding_projection_is_append_only_and_target_order_independent() -> Non
         ("finding-1", "scope-1", "ARTIFACT", "artifact-b", None),
     }
     assert all(effect.operation == "first_write" for effect in first_effects)
+
+
+def test_lifecycle_projection_rechecks_assertion_and_preserves_exact_provenance() -> None:
+    lifecycle = finding_record(event_id="event-fix")
+    attributes = lifecycle["attributes"]
+    attributes["agentops.review.id"] = "review-fix"
+    attributes["agentops.source.review.id"] = "review-1"
+    attributes["agentops.finding.status"] = "CLOSED_FIXED"
+    attributes["agentops.writer.invocation.id"] = "writer-invocation-fix"
+    attributes["agentops.reviewer.invocation.id"] = "reviewer-invocation-fix"
+    attributes["agentops.fix.id"] = "fix-1"
+    attributes["agentops.fix.finding.id"] = "finding-1"
+
+    effects = AdmissionService.project(validate_record(lifecycle))
+    required_assertion = next(
+        effect for effect in effects if effect.kind == "require_finding_assertion"
+    )
+    fix = next(effect for effect in effects if effect.kind == "finding_fix")
+
+    assert required_assertion.payload["agentops.finding.summary"] == (
+        "The accepted assertion remains factual."
+    )
+    assert fix.payload == {
+        "finding_id": "finding-1",
+        "review_id": "review-fix",
+        "writer_role_id": "writer",
+        "writer_invocation_id": "writer-invocation-fix",
+        "reviewer_role_id": "reviewer",
+        "reviewer_invocation_id": "reviewer-invocation-fix",
+    }
+
+
+def test_usage_compatibility_keeps_units_and_missingness_separate() -> None:
+    def usage(event_id: str, unit: str, state: str) -> dict[str, Any]:
+        return {
+            "profile_version": "1.0.0",
+            "record_type": "event",
+            "event_name": "usage",
+            "resource": {"service.name": "dsh", "service.version": "1"},
+            "scope": {
+                "name": "io.agentops.dsh.observation",
+                "version": "1.0.0",
+                "schema_url": "https://opentelemetry.io/schemas/1.41.0",
+            },
+            "attributes": {
+                "agentops.event.id": event_id,
+                "agentops.workflow.family": "implementation",
+                "agentops.family.schema": "implementation@1",
+                "agentops.summary.state": state,
+                "agentops.usage.kind": "money",
+                "agentops.usage.unit": unit,
+                "agentops.usage.source": "provider",
+                "agentops.usage.source.id": "provider-1",
+                "agentops.usage.value": 0,
+            },
+        }
+
+    usd = AdmissionService.project(validate_record(usage("usage-1", "USD", "FINAL")))[0]
+    eur = AdmissionService.project(validate_record(usage("usage-2", "EUR", "FINAL")))[0]
+    unavailable = AdmissionService.project(validate_record(usage("usage-3", "USD", "UNAVAILABLE")))[
+        0
+    ]
+
+    assert usd.payload["compatibility_key"] != eur.payload["compatibility_key"]
+    assert usd.payload["aggregate_eligible"] is True
+    assert unavailable.payload["aggregate_eligible"] is False

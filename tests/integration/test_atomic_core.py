@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from copy import deepcopy
 from typing import Any
 
 import psycopg
@@ -9,6 +10,7 @@ import pytest
 
 from wsr_evidence.admission.service import AdmissionService, Disposition
 from wsr_evidence.storage.postgresql import PostgresStorage
+from wsr_evidence.storage.read_model import CORE_READ_MODEL_VERSION
 
 
 def finding_record(*, event_id: str, target_id: str = "artifact-1") -> dict[str, Any]:
@@ -58,17 +60,118 @@ async def table_count(database_url: str, table: str) -> int:
     return int(row[0])
 
 
+async def clear_core(database_url: str) -> None:
+    async with await psycopg.AsyncConnection.connect(database_url) as connection:
+        await connection.execute("TRUNCATE projection_effects, accepted_records")
+
+
+def lifecycle_record(
+    original: dict[str, Any], *, event_id: str, review_id: str, fix: bool = False
+) -> dict[str, Any]:
+    record = deepcopy(original)
+    attributes = record["attributes"]
+    attributes["agentops.event.id"] = event_id
+    attributes["agentops.review.id"] = review_id
+    attributes["agentops.source.review.id"] = "review-1"
+    attributes["agentops.finding.status"] = "CLOSED_FIXED"
+    attributes["agentops.writer.invocation.id"] = f"writer-{review_id}"
+    attributes["agentops.reviewer.invocation.id"] = f"reviewer-{review_id}"
+    if fix:
+        attributes["agentops.fix.id"] = "fix-1"
+        attributes["agentops.fix.finding.id"] = "finding-1"
+    else:
+        attributes["agentops.recheck.id"] = "recheck-1"
+        attributes["agentops.recheck.review.id"] = "review-1"
+        attributes["agentops.recheck.finding.id"] = "finding-1"
+        attributes["agentops.recheck.fix.id"] = "fix-1"
+        attributes["agentops.iteration.id"] = "iteration-1"
+        attributes["agentops.recheck.role.id"] = "rechecker"
+        attributes["agentops.recheck.invocation.id"] = "rechecker-invocation-1"
+    return record
+
+
+def delivery_root(*, trace_id: str = "1" * 32) -> dict[str, Any]:
+    return {
+        "profile_version": "1.0.0",
+        "record_type": "span",
+        "span_name": "invoke_workflow delivery-1",
+        "trace_id": trace_id,
+        "span_id": "1" * 16,
+        "span_kind": "INTERNAL",
+        "start_time_unix_nano": "100",
+        "end_time_unix_nano": "400",
+        "span_flags": 1,
+        "span_links": [],
+        "span_status": "UNSET",
+        "resource": {"service.name": "dsh", "service.version": "1"},
+        "scope": {
+            "name": "io.agentops.dsh.observation",
+            "version": "1.0.0",
+            "schema_url": "https://opentelemetry.io/schemas/1.41.0",
+        },
+        "attributes": {
+            "agentops.delivery.id": "delivery-1",
+            "agentops.workflow.id": "workflow-1",
+            "agentops.workflow.version": "1",
+            "agentops.implementation.id": "implementation-1",
+            "agentops.runtime.id": "runtime-1",
+            "agentops.manifest.digest": "b" * 64,
+            "agentops.workflow.family": "implementation",
+        },
+    }
+
+
+def model_span(
+    *, trace_id: str = "1" * 32, span_id: str = "2" * 16, runtime_id: str = "runtime-1"
+) -> dict[str, Any]:
+    record = delivery_root(trace_id=trace_id)
+    record.update(
+        {
+            "span_name": "chat provider",
+            "span_id": span_id,
+            "span_kind": "CLIENT",
+            "parent_span_id": "1" * 16,
+            "start_time_unix_nano": "150",
+            "end_time_unix_nano": "250",
+        }
+    )
+    record["attributes"] = {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.provider.name": "provider",
+        "gen_ai.request.model": "model-alias",
+        "agentops.model.id": "canonical-model",
+        "agentops.role.id": "implementer",
+        "agentops.runtime.id": runtime_id,
+    }
+    return record
+
+
+def sampling_record(event_id: str) -> dict[str, Any]:
+    return {
+        "profile_version": "1.0.0",
+        "record_type": "event",
+        "event_name": "sampling.decision",
+        "resource": {"service.name": "dsh", "service.version": "1"},
+        "scope": {
+            "name": "io.agentops.dsh.observation",
+            "version": "1.0.0",
+            "schema_url": "https://opentelemetry.io/schemas/1.41.0",
+        },
+        "attributes": {
+            "agentops.event.id": event_id,
+            "agentops.sampling.decision": "DROP",
+            "agentops.sampling.probability": 0.0,
+        },
+    }
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_identity_and_projection_commit_as_one_first_write_slice() -> None:
     database_url = os.environ.get("WSR_EVIDENCE_DATABASE_URL")
     if database_url is None:
         pytest.skip("WSR_EVIDENCE_DATABASE_URL is not configured")
-    async with (
-        await psycopg.AsyncConnection.connect(database_url) as connection,
-        connection.cursor() as cursor,
-    ):
-        await cursor.execute("TRUNCATE projection_effects, accepted_records")
+    await clear_core(database_url)
 
     storage = await PostgresStorage.open(database_url)
     service = AdmissionService(storage)
@@ -97,5 +200,104 @@ async def test_identity_and_projection_commit_as_one_first_write_slice() -> None
         second_target = finding_record(event_id="event-3", target_id="artifact-2")
         assert (await service.admit(second_target)).disposition is Disposition.ACCEPTED
         assert await table_count(database_url, "accepted_records") == 2
+    finally:
+        await storage.close()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_lifecycle_preconditions_and_restart_retries_leave_no_half_state() -> None:
+    database_url = os.environ.get("WSR_EVIDENCE_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("WSR_EVIDENCE_DATABASE_URL is not configured")
+    await clear_core(database_url)
+    original = finding_record(event_id="event-original")
+    fix = lifecycle_record(original, event_id="event-fix", review_id="review-fix", fix=True)
+    recheck = lifecycle_record(original, event_id="event-recheck", review_id="review-recheck")
+
+    storage = await PostgresStorage.open(database_url)
+    service = AdmissionService(storage)
+    try:
+        assert (await service.admit(fix)).disposition is Disposition.REJECTED
+        assert await table_count(database_url, "accepted_records") == 0
+        assert await table_count(database_url, "projection_effects") == 0
+        assert (await service.admit(original)).disposition is Disposition.ACCEPTED
+        assert (await service.admit(fix)).disposition is Disposition.ACCEPTED
+    finally:
+        await storage.close()
+
+    reopened = await PostgresStorage.open(database_url)
+    restarted_service = AdmissionService(reopened)
+    try:
+        assert (await restarted_service.admit(fix)).disposition is Disposition.DUPLICATE
+        assert (await restarted_service.admit(recheck)).disposition is Disposition.ACCEPTED
+        changed_recheck = deepcopy(recheck)
+        changed_recheck["attributes"]["agentops.event.id"] = "event-recheck-conflict"
+        changed_recheck["attributes"]["agentops.writer.role.id"] = "different-writer"
+        assert (await restarted_service.admit(changed_recheck)).disposition is Disposition.CONFLICT
+        changed_assertion = lifecycle_record(
+            original, event_id="event-changed", review_id="review-changed", fix=True
+        )
+        changed_assertion["attributes"]["agentops.fix.id"] = "fix-2"
+        changed_assertion["attributes"]["agentops.finding.summary"] = "Changed assertion."
+        assert (
+            await restarted_service.admit(changed_assertion)
+        ).disposition is Disposition.REJECTED
+        assert await table_count(database_url, "accepted_records") == 3
+    finally:
+        await reopened.close()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_model_attribution_requires_the_matching_delivery_root_atomically() -> None:
+    database_url = os.environ.get("WSR_EVIDENCE_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("WSR_EVIDENCE_DATABASE_URL is not configured")
+    await clear_core(database_url)
+    storage = await PostgresStorage.open(database_url)
+    service = AdmissionService(storage)
+    try:
+        assert (await service.admit(model_span())).disposition is Disposition.REJECTED
+        assert await table_count(database_url, "accepted_records") == 0
+        assert (await service.admit(delivery_root())).disposition is Disposition.ACCEPTED
+        assert (await service.admit(model_span())).disposition is Disposition.ACCEPTED
+        mismatched = model_span(span_id="3" * 16, runtime_id="runtime-2")
+        assert (await service.admit(mismatched)).disposition is Disposition.REJECTED
+        assert await table_count(database_url, "accepted_records") == 2
+    finally:
+        await storage.close()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_versioned_read_model_seam_has_stable_keyset_pagination() -> None:
+    database_url = os.environ.get("WSR_EVIDENCE_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("WSR_EVIDENCE_DATABASE_URL is not configured")
+    await clear_core(database_url)
+    storage = await PostgresStorage.open(database_url)
+    service = AdmissionService(storage)
+    try:
+        assert CORE_READ_MODEL_VERSION == "1.0.0"
+        assert (await service.admit(sampling_record("event-a"))).disposition is (
+            Disposition.ACCEPTED
+        )
+        assert (await service.admit(sampling_record("event-b"))).disposition is (
+            Disposition.ACCEPTED
+        )
+
+        first_page = await storage.scan_effects(
+            kind="factual_contribution", after_key=None, limit=1
+        )
+        second_page = await storage.scan_effects(
+            kind="factual_contribution", after_key=first_page[0].key, limit=1
+        )
+
+        assert [page[0].key for page in (first_page, second_page)] == [
+            ("sampling.decision", "event-a"),
+            ("sampling.decision", "event-b"),
+        ]
+        assert all(page[0].source_identity[0] == "event" for page in (first_page, second_page))
     finally:
         await storage.close()

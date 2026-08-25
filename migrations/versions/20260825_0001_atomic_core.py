@@ -41,6 +41,8 @@ def upgrade() -> None:
         sa.Column("effect_kind", sa.Text(), nullable=False),
         sa.Column("effect_key", sa.Text(), nullable=False),
         sa.Column("payload", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("source_identity_kind", sa.Text(), nullable=False),
+        sa.Column("source_identity_key", sa.Text(), nullable=False),
         sa.Column(
             "recorded_at",
             sa.DateTime(timezone=True),
@@ -48,6 +50,11 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("effect_kind", "effect_key"),
+        sa.ForeignKeyConstraint(
+            ["source_identity_kind", "source_identity_key"],
+            ["accepted_records.identity_kind", "accepted_records.identity_key"],
+            ondelete="RESTRICT",
+        ),
     )
     op.create_index(
         "ix_projection_effects_kind_recorded",
