@@ -1,11 +1,13 @@
 """Database seam. Admission owns when one transaction begins and ends."""
 
 from contextlib import AbstractAsyncContextManager
-from typing import Protocol
+from typing import Any, Protocol
 
 
 class EvidenceTransaction(Protocol):
-    """Marker protocol extended by repositories in their owning waves."""
+    async def claim_identity(self, record: Any) -> Any: ...
+
+    async def apply_effects(self, effects: tuple[Any, ...]) -> None: ...
 
 
 class TransactionManager(Protocol):
