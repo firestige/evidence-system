@@ -1,0 +1,87 @@
+name: Evidence release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_tag:
+        description: RC tag, for example 0.1.0-rc.1
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      candidate_tag:
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: evidence-release-candidate
+  cancel-in-progress: false
+
+jobs:
+  qualify-and-publish-prerelease:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify release trigger branch
+        run: test "$GITHUB_REF_NAME" = "release/next"
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          version: 0.11.28
+          python-version: "3.14"
+      - uses: docker/setup-buildx-action@v3
+      - name: Verify candidate coordinate and collisions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+        run: |
+          VERSION="$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          case "$CANDIDATE_TAG" in "$VERSION"-rc.*) ;; *) exit 1 ;; esac
+          ! gh release view "$CANDIDATE_TAG"
+          ! git ls-remote --exit-code --tags origin "refs/tags/$CANDIDATE_TAG"
+      - name: Run acceptance gates
+        run: make check && make integration && make deployment
+      - name: Build and publish candidate OCI image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx build --push \
+            --tag "ghcr.io/firestige/wsr-evidence:$CANDIDATE_TAG" \
+            --metadata-file "$RUNNER_TEMP/image-metadata.json" \
+            --file deployment/Dockerfile .
+          jq -r '.["containerimage.digest"]' "$RUNNER_TEMP/image-metadata.json" > "$RUNNER_TEMP/oci-digest"
+      - name: Build immutable Python assets and manifest
+        run: |
+          uv run python -m release.cli.release build \
+            "$RUNNER_TEMP/local-release" "$(cat "$RUNNER_TEMP/oci-digest")"
+      - name: Create RC only after local qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+        run: gh release create "$CANDIDATE_TAG" "$RUNNER_TEMP/local-release/"* --prerelease --target "$GITHUB_SHA"
+      - name: Redownload and verify exact RC assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+        run: |
+          mkdir "$RUNNER_TEMP/remote-release"
+          gh release download "$CANDIDATE_TAG" --dir "$RUNNER_TEMP/remote-release"
+          uv run python -m release.cli.release verify "$RUNNER_TEMP/remote-release"
+          cmp "$RUNNER_TEMP/local-release/release-metadata.json" "$RUNNER_TEMP/remote-release/release-metadata.json"
+          OCI_DIGEST="$(jq -r .ociDigest "$RUNNER_TEMP/remote-release/release-metadata.json")"
+          docker pull "ghcr.io/firestige/wsr-evidence@$OCI_DIGEST"
+      - name: Attach qualification evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+        run: |
+          export CANDIDATE_TAG
+          uv run python -c 'import hashlib,json,os,pathlib; p=pathlib.Path(os.environ["RUNNER_TEMP"]); m=(p/"remote-release/release-metadata.json").read_bytes(); d=json.loads(m); q={"schemaVersion":"wsr.release-qualification@1.0.0","candidateTag":os.environ["CANDIDATE_TAG"],"commit":os.environ["GITHUB_SHA"],"artifactMetadataSha256":"sha256:"+hashlib.sha256(m).hexdigest(),"ociDigest":d["ociDigest"],"localAcceptance":{"status":"PASS"},"remoteQualification":{"status":"PASS"}}; (p/"release-qualification.json").write_text(json.dumps(q,indent=2)+"\n")'
+          gh release upload "$CANDIDATE_TAG" "$RUNNER_TEMP/release-qualification.json"

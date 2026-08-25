@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "wsr.release-component@1.0.0",
+  "repository": "firestige/evidence-system",
+  "releaseBranch": "main",
+  "triggerBranch": "release/next",
+  "assetMode": "python-wheel-sdist+oci",
+  "acceptanceCommand": "make check && make integration && make deployment",
+  "buildCommand": "uv run python -m release.cli.release build",
+  "verifyCommand": "uv run python -m release.cli.release verify",
+  "publisherAdapter": "python-github-release+ghcr",
+  "remoteInstallMode": "compose-loopback-otlp",
+  "stablePolicy": "qualified-candidate-exact-assets",
+  "capabilities": ["github-release", "python-wheel-sdist", "ghcr-oci"]
+}
