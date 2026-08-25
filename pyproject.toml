@@ -1,0 +1,53 @@
+[project]
+name = "wsr-evidence"
+version = "0.1.0"
+description = "Loopback-only OTLP evidence data service for workflow-self-recursive"
+readme = "README.md"
+requires-python = ">=3.13,<3.15"
+license = "Apache-2.0"
+authors = [{ name = "firestige" }]
+dependencies = [
+  "alembic==1.19.1",
+  "fastapi==0.141.1",
+  "opentelemetry-proto==1.44.0",
+  "psycopg[binary]==3.3.4",
+  "psycopg-pool==3.3.1",
+  "sqlalchemy==2.0.52",
+  "uvicorn==0.52.4",
+]
+
+[project.scripts]
+wsr-evidence = "wsr_evidence.cli:main"
+
+[build-system]
+requires = ["uv-build==0.12.5"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+  "httpx==0.28.1",
+  "mypy==2.3.1",
+  "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
+  "ruff==0.16.4",
+]
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers"
+testpaths = ["tests"]
+markers = ["integration: requires a local PostgreSQL service"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+packages = ["wsr_evidence"]
+
+[tool.uv]
+required-version = ">=0.11.28,<0.12"
