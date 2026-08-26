@@ -24,6 +24,8 @@ from wsr_evidence.storage.read_model import (
     ResourceClass,
     RetentionPolicy,
     SnapshotPage,
+    TraceDetailState,
+    TraceSummary,
     TruthState,
 )
 
@@ -124,12 +126,14 @@ def test_expiry_batch_identity_is_canonical_and_rejects_duplicates() -> None:
         resource_class=ResourceClass.TRACE_DETAIL,
         policy_revision="1.0.0",
         cutoff=cutoff,
+        ttl_seconds=2_592_000,
         members=(trace_b, trace_a),
     )
     second = ExpiryBatch.create(
         resource_class=ResourceClass.TRACE_DETAIL,
         policy_revision="1.0.0",
         cutoff=cutoff,
+        ttl_seconds=2_592_000,
         members=(trace_a, trace_b),
     )
 
@@ -142,6 +146,7 @@ def test_expiry_batch_identity_is_canonical_and_rejects_duplicates() -> None:
             resource_class=ResourceClass.TRACE_DETAIL,
             policy_revision="1.0.0",
             cutoff=cutoff,
+            ttl_seconds=2_592_000,
             members=(trace_a, trace_a),
         )
 
@@ -151,6 +156,7 @@ def test_equal_owner_keys_in_different_resource_kinds_remain_distinct() -> None:
         resource_class=ResourceClass.FACTUAL_PROJECTION,
         policy_revision="1.0.0",
         cutoff=datetime(2026, 8, 26, tzinfo=UTC),
+        ttl_seconds=31_536_000,
         members=(
             ExpiryOwner(resource_kind="FINDING_ASSERTION", owner_key=("same", "key")),
             ExpiryOwner(resource_kind="ROLE_LINEAGE", owner_key=("same", "key")),
@@ -166,8 +172,42 @@ def test_accepted_provenance_cannot_be_planned_for_expiry() -> None:
             resource_class=ResourceClass.ACCEPTED_PROVENANCE,
             policy_revision="1.0.0",
             cutoff=datetime(2026, 8, 26, tzinfo=UTC),
+            ttl_seconds=0,
             members=(),
         )
+
+
+def test_expiry_batch_has_a_cross_language_canonical_digest_vector() -> None:
+    batch = ExpiryBatch.create(
+        resource_class=ResourceClass.FACTUAL_PROJECTION,
+        policy_revision="1.0.0",
+        cutoff=datetime(2026, 8, 26, 1, 2, 3, tzinfo=UTC),
+        ttl_seconds=31_536_000,
+        members=(
+            ExpiryOwner(resource_kind="ROLE_LINEAGE", owner_key=("家", True, 7, 1.5, None)),
+            ExpiryOwner(resource_kind="FINDING_ASSERTION", owner_key=("same", "key")),
+        ),
+    )
+
+    assert batch.ttl_seconds == 31_536_000
+    assert (
+        batch.batch_identity == "21cb8ff7585fea778af051160ce1b02b4672127b4d1d9b75e83e783694f02657"
+    )
+
+
+def test_trace_summaries_are_closed_and_allow_partial_detail() -> None:
+    available = TraceSummary(trace_id="a" * 32, state=TraceDetailState.AVAILABLE)
+    partial = TraceSummary(trace_id="b" * 32, state=TraceDetailState.PARTIAL)
+    expired = TraceSummary(trace_id="c" * 32, state=TraceDetailState.EXPIRED)
+
+    assert [summary.state.value for summary in (available, partial, expired)] == [
+        "AVAILABLE",
+        "PARTIAL",
+        "EXPIRED",
+    ]
+
+    with pytest.raises(ValueError, match="trace_id"):
+        TraceSummary(trace_id="not-a-trace", state=TraceDetailState.AVAILABLE)
 
 
 def test_expiry_result_requires_an_exact_partition() -> None:

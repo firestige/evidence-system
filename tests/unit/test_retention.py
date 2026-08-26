@@ -4,6 +4,7 @@ import pytest
 
 from wsr_evidence.clock import FakeClock
 from wsr_evidence.retention.config import RetentionSettings
+from wsr_evidence.retention.postgresql import _projection_compatibility
 from wsr_evidence.retention.service import RetentionService
 from wsr_evidence.storage.read_model import (
     ExpiryBatch,
@@ -16,7 +17,7 @@ from wsr_evidence.storage.read_model import (
 
 class FakeMaintenance:
     def __init__(self) -> None:
-        self.planned: list[tuple[ResourceClass, datetime, int]] = []
+        self.planned: list[tuple[ResourceClass, datetime, int, int]] = []
         self.applied: list[tuple[ExpiryBatch, datetime]] = []
 
     async def plan_expiry(
@@ -25,13 +26,15 @@ class FakeMaintenance:
         resource_class: ResourceClass,
         policy_revision: str,
         cutoff: datetime,
+        ttl_seconds: int,
         limit: int,
     ) -> ExpiryBatch:
-        self.planned.append((resource_class, cutoff, limit))
+        self.planned.append((resource_class, cutoff, ttl_seconds, limit))
         return ExpiryBatch.create(
             resource_class=resource_class,
             policy_revision=policy_revision,
             cutoff=cutoff,
+            ttl_seconds=ttl_seconds,
             members=(
                 ExpiryOwner(
                     resource_kind={
@@ -72,8 +75,8 @@ async def test_fake_clock_plans_only_configured_physical_lifecycles() -> None:
     results = await service.run_once()
 
     assert maintenance.planned == [
-        (ResourceClass.RAW_DEBUG, now, 17),
-        (ResourceClass.FACTUAL_PROJECTION, now - timedelta(days=90), 17),
+        (ResourceClass.RAW_DEBUG, now, 0, 17),
+        (ResourceClass.FACTUAL_PROJECTION, now - timedelta(days=90), 7_776_000, 17),
     ]
     assert [batch.resource_class for batch, _ in maintenance.applied] == [
         ResourceClass.RAW_DEBUG,
@@ -119,3 +122,22 @@ def test_environment_rejects_unsupported_retention_values_before_runtime_effects
 
     with pytest.raises(ValueError):
         RetentionSettings.from_environment()
+
+
+def test_expiry_tombstone_preserves_exact_model_compatibility() -> None:
+    compatibility = _projection_compatibility(
+        effect_kind="model_attribution",
+        effect_key=("provider", "model", "role", "runtime", "1" * 32, "a" * 16),
+        payload={"request_model": "requested"},
+        family="implementation@1",
+    )
+
+    assert compatibility == [
+        ["family_schema", "implementation@1"],
+        ["event_name", None],
+        ["completeness", None],
+        ["gen_ai.provider.name", "provider"],
+        ["C57", "model"],
+        ["C30", "role"],
+        ["C06", "runtime"],
+    ]

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, cast
 
 from psycopg_pool import AsyncConnectionPool
@@ -68,6 +68,45 @@ COMPATIBILITY_DIMENSIONS = {
 }
 
 
+def _projection_compatibility(
+    *, effect_kind: str, effect_key: tuple[Any, ...], payload: dict[str, Any], family: str | None
+) -> list[list[Any]]:
+    compatibility: list[list[Any]] = [
+        ["family_schema", family],
+        ["event_name", None],
+        ["completeness", None],
+    ]
+    if effect_kind == "factual_contribution":
+        event_name = effect_key[0]
+        attributes = payload.get("attributes", {})
+        compatibility[1][1] = event_name
+        compatibility[2][1] = attributes.get("agentops.summary.state")
+        compatibility.extend(
+            [field_id, attributes[name]]
+            for field_id, name in COMPATIBILITY_DIMENSIONS.get(str(event_name), ())
+            if name in attributes
+        )
+    elif effect_kind == "finding_assertion":
+        for field_id, name in (
+            ("C13", "agentops.review.lens"),
+            ("C14", "agentops.review.scope"),
+        ):
+            if name in payload:
+                compatibility.append([field_id, payload[name]])
+    elif effect_kind == "model_attribution":
+        compatibility.extend(
+            (
+                ["gen_ai.provider.name", effect_key[0]],
+                ["C57", effect_key[1]],
+                ["C30", effect_key[2]],
+                ["C06", effect_key[3]],
+            )
+        )
+    if effect_kind == "delivery_root_binding":
+        compatibility.append(["delivery_id", payload["delivery_id"]])
+    return compatibility
+
+
 def _key_json(key: OwnerKey) -> str:
     return json.dumps(key, ensure_ascii=False, separators=(",", ":"))
 
@@ -86,6 +125,7 @@ class PostgresRetentionMaintenance:
         resource_class: ResourceClass,
         policy_revision: str,
         cutoff: datetime,
+        ttl_seconds: int,
         limit: int,
     ) -> ExpiryBatch:
         if resource_class is ResourceClass.ACCEPTED_PROVENANCE:
@@ -133,6 +173,7 @@ class PostgresRetentionMaintenance:
             resource_class=resource_class,
             policy_revision=policy_revision,
             cutoff=cutoff,
+            ttl_seconds=ttl_seconds,
             members=tuple(
                 ExpiryOwner(
                     resource_kind=("RAW_DEBUG" if row[0] == "RAW_DEBUG" else PUBLIC_KINDS[row[0]]),
@@ -184,8 +225,8 @@ class PostgresRetentionMaintenance:
                         INSERT INTO retention_expiry_markers
                             (resource_class, owner_key, source_identity_kind,
                              source_identity_key, resource_kind, recorded_at, compatibility,
-                             policy_revision, expired_at, batch_identity)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
+                             policy_revision, expires_at, expired_at, batch_identity)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s)
                         """,
                         (
                             batch.resource_class.value,
@@ -196,6 +237,7 @@ class PostgresRetentionMaintenance:
                             record[3],
                             json.dumps(record[4], separators=(",", ":")),
                             batch.policy_revision,
+                            record[3] + timedelta(seconds=batch.ttl_seconds),
                             clock_now,
                             batch.batch_identity,
                         ),
@@ -258,21 +300,10 @@ class PostgresRetentionMaintenance:
         if not rows:
             return None
         source_kind, source_key, effect_kind, recorded_at, effect_key, payload, family = rows[0]
-        compatibility: list[list[Any]] = [
-            ["family_schema", family],
-            ["event_name", None],
-            ["completeness", None],
-        ]
-        if effect_kind == "factual_contribution":
-            event_name = json.loads(effect_key)[0]
-            attributes = payload.get("attributes", {})
-            compatibility[1][1] = event_name
-            compatibility[2][1] = attributes.get("agentops.summary.state")
-            compatibility.extend(
-                [field_id, attributes[name]]
-                for field_id, name in COMPATIBILITY_DIMENSIONS.get(event_name, ())
-                if name in attributes
-            )
-        if effect_kind == "delivery_root_binding":
-            compatibility.append(["delivery_id", payload["delivery_id"]])
+        compatibility = _projection_compatibility(
+            effect_kind=effect_kind,
+            effect_key=tuple(json.loads(effect_key)),
+            payload=payload,
+            family=family,
+        )
         return source_kind, source_key, effect_kind, recorded_at, compatibility

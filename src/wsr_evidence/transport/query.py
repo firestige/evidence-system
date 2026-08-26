@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import cast
 
 from fastapi import APIRouter, Request
@@ -64,9 +65,10 @@ def _accepts_json(header: str) -> bool:
         quality = 1.0
         for parameter in parts[1:]:
             if parameter.startswith("q="):
-                try:
-                    quality = float(parameter.removeprefix("q="))
-                except ValueError:
+                raw_quality = parameter.removeprefix("q=")
+                if re.fullmatch(r"(?:0(?:\.\d{1,3})?|1(?:\.0{1,3})?)", raw_quality):
+                    quality = float(raw_quality)
+                else:
                     quality = 0.0
         if quality > 0 and parts[0] in {"*/*", "application/*", "application/json"}:
             return True

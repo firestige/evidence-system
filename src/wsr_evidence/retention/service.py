@@ -38,6 +38,7 @@ class RetentionService:
                 resource_class=resource_class,
                 policy_revision=self._policy.revision,
                 cutoff=now - ttl,
+                ttl_seconds=int(ttl.total_seconds()),
                 limit=self._policy.batch_size,
             )
             results.append(await self._maintenance.apply_expiry(batch=batch, clock_now=now))

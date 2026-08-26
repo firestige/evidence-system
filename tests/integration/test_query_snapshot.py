@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -16,7 +16,12 @@ from wsr_evidence.query.postgresql import PostgresQueryReadModel
 from wsr_evidence.query.service import QueryService
 from wsr_evidence.retention.postgresql import PostgresRetentionMaintenance
 from wsr_evidence.storage.postgresql import PostgresStorage
-from wsr_evidence.storage.read_model import ExpiryBatch, ExpiryOwner, ResourceClass
+from wsr_evidence.storage.read_model import (
+    ExpiryBatch,
+    ExpiryOwner,
+    ResourceClass,
+    RetentionPolicy,
+)
 
 
 def sampling_record(event_id: str) -> dict[str, Any]:
@@ -218,6 +223,7 @@ async def test_retention_lifecycles_are_independent_idempotent_and_queryable() -
             resource_class=ResourceClass.RAW_DEBUG,
             policy_revision="1.0.0",
             cutoff=now,
+            ttl_seconds=0,
             limit=10,
         )
         first_raw = await maintenance.apply_expiry(batch=raw, clock_now=now)
@@ -257,6 +263,7 @@ async def test_retention_lifecycles_are_independent_idempotent_and_queryable() -
             resource_class=ResourceClass.FACTUAL_PROJECTION,
             policy_revision="1.0.0",
             cutoff=now,
+            ttl_seconds=31_536_000,
             limit=10,
         )
         concurrent_results = await asyncio.gather(
@@ -281,10 +288,14 @@ async def test_retention_lifecycles_are_independent_idempotent_and_queryable() -
             is None
         )
         await query_storage.release_snapshot(pre_expiry_snapshot.snapshot_id)
-        expired_facts = await QueryService(query_storage).facts({"event_name": "sampling.decision"})
+        expired_facts = await QueryService(
+            query_storage,
+            retention_policy=RetentionPolicy(factual_projection_ttl=timedelta(days=30)),
+        ).facts({"event_name": "sampling.decision"})
         assert expired_facts["items"][0]["fields"] == []
         assert expired_facts["items"][0]["truth"]["expiry"] == "EXPIRED"
         assert expired_facts["items"][0]["truth"]["availability"] == "UNAVAILABLE"
+        assert expired_facts["items"][0]["truth"]["expires_at"] == "2026-01-01T00:00:00.000000Z"
 
         active_trace = await QueryService(query_storage).traces({"delivery_id": "delivery-1"})
         assert active_trace["trace_state"] == "AVAILABLE"
@@ -292,8 +303,24 @@ async def test_retention_lifecycles_are_independent_idempotent_and_queryable() -
             resource_class=ResourceClass.TRACE_DETAIL,
             policy_revision="1.0.0",
             cutoff=now,
+            ttl_seconds=2_592_000,
             limit=10,
         )
+        partial_trace = ExpiryBatch.create(
+            resource_class=ResourceClass.TRACE_DETAIL,
+            policy_revision="1.0.0",
+            cutoff=now,
+            ttl_seconds=2_592_000,
+            members=(trace.members[0],),
+        )
+        await maintenance.apply_expiry(batch=partial_trace, clock_now=now)
+        partially_expired_trace = await QueryService(query_storage).traces(
+            {"delivery_id": "delivery-1"}
+        )
+        assert partially_expired_trace["trace_state"] == "PARTIAL"
+        assert partially_expired_trace["trace_summaries"] == [
+            {"trace_id": trace_id, "state": "PARTIAL"}
+        ]
         await maintenance.apply_expiry(batch=trace, clock_now=now)
         expired_trace = await QueryService(query_storage).traces({"delivery_id": "delivery-1"})
         assert expired_trace["trace_state"] == "EXPIRED"
@@ -313,6 +340,7 @@ async def test_retention_lifecycles_are_independent_idempotent_and_queryable() -
                 resource_class=ResourceClass.ACCEPTED_PROVENANCE,
                 policy_revision="1.0.0",
                 cutoff=now,
+                ttl_seconds=0,
                 limit=10,
             )
     finally:
@@ -339,6 +367,7 @@ async def test_retention_batch_failure_rolls_back_scrub_and_tombstone() -> None:
             resource_class=ResourceClass.RAW_DEBUG,
             policy_revision="1.0.0",
             cutoff=now,
+            ttl_seconds=0,
             members=(
                 ExpiryOwner(resource_kind="RAW_DEBUG", owner_key=("event", "event-a")),
                 ExpiryOwner(resource_kind="RAW_DEBUG", owner_key=("event", "zz-missing")),
@@ -408,6 +437,7 @@ async def test_equal_owner_keys_expire_independently_by_public_resource_kind() -
             resource_class=ResourceClass.FACTUAL_PROJECTION,
             policy_revision="1.0.0",
             cutoff=now,
+            ttl_seconds=31_536_000,
             limit=10,
         )
         assert {(member.resource_kind, member.owner_key) for member in planned.members} == {
@@ -419,6 +449,7 @@ async def test_equal_owner_keys_expire_independently_by_public_resource_kind() -
             resource_class=ResourceClass.FACTUAL_PROJECTION,
             policy_revision="1.0.0",
             cutoff=now,
+            ttl_seconds=31_536_000,
             members=(ExpiryOwner(resource_kind="FINDING_ASSERTION", owner_key=owner_key),),
         )
         await maintenance.apply_expiry(batch=assertion_only, clock_now=now)

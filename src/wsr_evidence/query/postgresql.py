@@ -24,6 +24,8 @@ from wsr_evidence.storage.read_model import (
     OwnerKey,
     ResourceClass,
     SnapshotPage,
+    TraceDetailState,
+    TraceSummary,
 )
 
 FACT_EFFECT_KINDS = (
@@ -64,6 +66,11 @@ TRACE_KIND_ORDER_SQL = """CASE pe.effect_kind
     WHEN 'trace_node' THEN 1
     WHEN 'trace_parent_edge' THEN 2
     WHEN 'trace_link' THEN 3
+END"""
+TRACE_PUBLIC_KIND_SQL = """CASE pe.effect_kind
+    WHEN 'trace_node' THEN 'NODE'
+    WHEN 'trace_parent_edge' THEN 'PARENT_EDGE'
+    WHEN 'trace_link' THEN 'LINK'
 END"""
 FACT_ID_SQL = (
     "'fact:' || pe.source_identity_kind || ':' || pe.source_identity_key || ':' || "
@@ -201,7 +208,7 @@ class PostgresQueryReadModel:
             await cursor.execute(
                 """
                 SELECT source_identity_kind, source_identity_key, resource_kind, recorded_at,
-                       compatibility, policy_revision, expired_at
+                       compatibility, policy_revision, expires_at, expired_at
                 FROM retention_expiry_markers
                 WHERE resource_class = %s AND resource_kind = %s AND owner_key = %s
                 """,
@@ -222,7 +229,50 @@ class PostgresQueryReadModel:
             recorded_at=row[3],
             compatibility=tuple(tuple(pair) for pair in row[4]),
             policy_revision=row[5],
-            expired_at=row[6],
+            expires_at=row[6],
+            expired_at=row[7],
+        )
+
+    async def summarize_traces(self, *, snapshot_id: str) -> tuple[TraceSummary, ...]:
+        lease = self._leases.get(snapshot_id)
+        if lease is None:
+            raise SnapshotError(SnapshotFault.EXPIRED, "snapshot lease expired")
+        if lease.query != "TRACES":
+            raise SnapshotError(SnapshotFault.MISMATCH, "snapshot is not a Trace query")
+        clauses = ["pe.effect_kind = ANY(%s)"]
+        parameters: list[Any] = [list(TRACE_EFFECT_KINDS)]
+        for name, value in lease.filters:
+            if name in {"limit", "cursor"}:
+                continue
+            self._add_filter(lease.query, clauses, parameters, name, value)
+        statement = f"""
+            SELECT pe.effect_key::jsonb ->> 0 AS trace_id,
+                   count(*) FILTER (WHERE marker.owner_key IS NULL) AS active_count,
+                   count(*) FILTER (WHERE marker.owner_key IS NOT NULL) AS expired_count
+            FROM projection_effects pe
+            LEFT JOIN retention_expiry_markers marker
+              ON marker.resource_class = 'TRACE_DETAIL'
+             AND marker.resource_kind = ({TRACE_PUBLIC_KIND_SQL})
+             AND marker.owner_key = pe.effect_key
+            WHERE {" AND ".join(clauses)}
+            GROUP BY trace_id
+            ORDER BY trace_id
+        """
+        async with lease.lock, lease.connection.cursor() as cursor:
+            await cursor.execute(statement, parameters)
+            rows = await cursor.fetchall()
+        return tuple(
+            TraceSummary(
+                trace_id=row[0],
+                state=(
+                    TraceDetailState.AVAILABLE
+                    if row[1] and not row[2]
+                    else TraceDetailState.PARTIAL
+                    if row[1] and row[2]
+                    else TraceDetailState.EXPIRED
+                ),
+            )
+            for row in rows
         )
 
     async def release_snapshot(self, snapshot_id: str) -> None:
@@ -291,6 +341,13 @@ class PostgresQueryReadModel:
             self._add_filter(lease.query, clauses, parameters, name, value)
         if lease.query == "TRACES" and any(name == "delivery_id" for name, _ in lease.filters):
             await self._enforce_trace_delivery_bound(lease)
+        if lease.query == "TRACES":
+            clauses.append(
+                "NOT EXISTS (SELECT 1 FROM retention_expiry_markers marker "
+                "WHERE marker.resource_class = 'TRACE_DETAIL' "
+                f"AND marker.resource_kind = ({TRACE_PUBLIC_KIND_SQL}) "
+                "AND marker.owner_key = pe.effect_key)"
+            )
         sort_columns = (
             ("pe.recorded_at", FACT_KIND_SQL, FACT_ID_SQL)
             if lease.query == "FACTS"

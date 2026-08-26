@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import struct
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -43,6 +44,12 @@ class Availability(StrEnum):
 
 class ExpiryState(StrEnum):
     ACTIVE = "ACTIVE"
+    EXPIRED = "EXPIRED"
+
+
+class TraceDetailState(StrEnum):
+    AVAILABLE = "AVAILABLE"
+    PARTIAL = "PARTIAL"
     EXPIRED = "EXPIRED"
 
 
@@ -200,12 +207,14 @@ class ExpiryRecord:
     recorded_at: datetime
     compatibility: tuple[tuple[str, Scalar], ...]
     policy_revision: str
+    expires_at: datetime
     expired_at: datetime
 
     def __post_init__(self) -> None:
         _validate_owner_key(self.owner_key)
         _validate_expiry_kind(self.resource_class, self.resource_kind)
         _require_aware(self.recorded_at, "recorded_at")
+        _require_aware(self.expires_at, "expires_at")
         _require_aware(self.expired_at, "expired_at")
         if not self.resource_kind or not self.policy_revision:
             raise ValueError("expiry marker coordinates must be nonempty")
@@ -226,6 +235,12 @@ def _validate_owner_key(owner_key: OwnerKey) -> None:
     for value in owner_key:
         if isinstance(value, str) and not 1 <= len(value.encode("utf-8")) <= 256:
             raise ValueError("owner key strings must contain 1 through 256 UTF-8 bytes")
+        if (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and not (-9_007_199_254_740_991 <= value <= 9_007_199_254_740_991)
+        ):
+            raise ValueError("owner key integers must be interoperable")
         if isinstance(value, float) and not math.isfinite(value):
             raise ValueError("owner key numbers must be finite")
 
@@ -235,12 +250,73 @@ def _canonical_key(owner_key: OwnerKey) -> str:
     return json.dumps(owner_key, ensure_ascii=False, separators=(",", ":"))
 
 
+def _encode_scalar(value: Scalar) -> bytes:
+    if value is None:
+        return b"n\n"
+    if isinstance(value, bool):
+        return b"b1\n" if value else b"b0\n"
+    if isinstance(value, int):
+        return f"i{value}\n".encode()
+    if isinstance(value, float):
+        return f"f{struct.pack('>d', value).hex()}\n".encode()
+    encoded = value.encode("utf-8")
+    return f"s{len(encoded)}:".encode() + encoded + b"\n"
+
+
+def _encode_array(values: tuple[Scalar | tuple[Scalar, ...], ...]) -> bytes:
+    encoded = [f"a{len(values)}\n".encode()]
+    for value in values:
+        encoded.append(_encode_array(value) if isinstance(value, tuple) else _encode_scalar(value))
+    return b"".join(encoded)
+
+
+def _canonical_member(member: ExpiryOwner) -> bytes:
+    return _encode_array((member.resource_kind, member.owner_key))
+
+
+def _canonical_batch_bytes(
+    *,
+    resource_class: ResourceClass,
+    policy_revision: str,
+    cutoff: datetime,
+    ttl_seconds: int,
+    members: tuple[ExpiryOwner, ...],
+) -> bytes:
+    normalized_cutoff = (
+        cutoff.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    )
+    return b"".join(
+        (
+            b"evidence-expiry-batch-v1\n",
+            _encode_scalar(resource_class.value),
+            _encode_scalar(policy_revision),
+            _encode_scalar(normalized_cutoff),
+            _encode_scalar(ttl_seconds),
+            b"a" + str(len(members)).encode() + b"\n",
+            *(_canonical_member(member) for member in members),
+        )
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class TraceSummary:
+    trace_id: str
+    state: TraceDetailState
+
+    def __post_init__(self) -> None:
+        if len(self.trace_id) != 32 or any(
+            character not in "0123456789abcdef" for character in self.trace_id
+        ):
+            raise ValueError("trace_id must be 32 lower-case hex")
+
+
 @dataclass(frozen=True, slots=True)
 class ExpiryBatch:
     batch_identity: str
     resource_class: ResourceClass
     policy_revision: str
     cutoff: datetime
+    ttl_seconds: int
     members: tuple[ExpiryOwner, ...]
 
     @classmethod
@@ -250,6 +326,7 @@ class ExpiryBatch:
         resource_class: ResourceClass,
         policy_revision: str,
         cutoff: datetime,
+        ttl_seconds: int,
         members: tuple[ExpiryOwner, ...],
     ) -> ExpiryBatch:
         if resource_class is ResourceClass.ACCEPTED_PROVENANCE:
@@ -257,40 +334,30 @@ class ExpiryBatch:
         if not policy_revision:
             raise ValueError("policy_revision must be nonempty")
         _require_aware(cutoff, "cutoff")
+        if not isinstance(ttl_seconds, int) or isinstance(ttl_seconds, bool) or ttl_seconds < 0:
+            raise ValueError("ttl_seconds must be a nonnegative integer")
         if len(members) > 1000:
             raise ValueError("expiry batch cannot exceed 1000 members")
         for member in members:
             _validate_expiry_kind(resource_class, member.resource_kind)
-        canonical = sorted(
-            (
-                json.dumps(
-                    [member.resource_kind, member.owner_key],
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-                member,
-            )
-            for member in members
-        )
+        canonical = sorted((_canonical_member(member), member) for member in members)
         if any(left[0] == right[0] for left, right in zip(canonical, canonical[1:], strict=False)):
             raise ValueError("expiry batch members must be unique")
         ordered = tuple(member for _, member in canonical)
-        normalized_cutoff = cutoff.astimezone(UTC).isoformat().replace("+00:00", "Z")
-        encoded = json.dumps(
-            [
-                resource_class.value,
-                policy_revision,
-                normalized_cutoff,
-                [[member.resource_kind, member.owner_key] for member in ordered],
-            ],
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode()
+        normalized_cutoff = cutoff.astimezone(UTC)
+        encoded = _canonical_batch_bytes(
+            resource_class=resource_class,
+            policy_revision=policy_revision,
+            cutoff=normalized_cutoff,
+            ttl_seconds=ttl_seconds,
+            members=ordered,
+        )
         return cls(
             batch_identity=hashlib.sha256(encoded).hexdigest(),
             resource_class=resource_class,
             policy_revision=policy_revision,
-            cutoff=cutoff.astimezone(UTC),
+            cutoff=normalized_cutoff,
+            ttl_seconds=ttl_seconds,
             members=ordered,
         )
 
@@ -337,6 +404,8 @@ class QueryExpiryReadModel[ResourceT](Protocol):
         snapshot_id: str,
     ) -> ExpiryRecord | None: ...
 
+    async def summarize_traces(self, *, snapshot_id: str) -> tuple[TraceSummary, ...]: ...
+
 
 @runtime_checkable
 class ExpiryMaintenance(Protocol):
@@ -346,6 +415,7 @@ class ExpiryMaintenance(Protocol):
         resource_class: ResourceClass,
         policy_revision: str,
         cutoff: datetime,
+        ttl_seconds: int,
         limit: int,
     ) -> ExpiryBatch: ...
 

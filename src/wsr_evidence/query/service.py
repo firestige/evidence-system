@@ -213,7 +213,6 @@ class QueryService:
         page = await self._page("TRACES", normalized, cursor, limit)
         try:
             items = []
-            expired = False
             for effect in page.resources:
                 expiry = await self._read_model.read_expiry(
                     resource_class=ResourceClass.TRACE_DETAIL,
@@ -222,12 +221,23 @@ class QueryService:
                     snapshot_id=page.snapshot_id,
                 )
                 if expiry is not None:
-                    expired = True
                     continue
                 items.append(_trace_resource(effect, ttl=self._retention_policy.trace_detail_ttl))
+            summaries = await self._read_model.summarize_traces(snapshot_id=page.snapshot_id)
             response = _envelope(page, items)
-            response["trace_state"] = "AVAILABLE" if items else "EXPIRED" if expired else "ABSENT"
-            if not items:
+            response["trace_summaries"] = [
+                {"trace_id": summary.trace_id, "state": summary.state.value}
+                for summary in summaries
+            ]
+            states = {summary.state.value for summary in summaries}
+            response["trace_state"] = (
+                "ABSENT"
+                if not states
+                else next(iter(states))
+                if len(states) == 1 and "PARTIAL" not in states
+                else "PARTIAL"
+            )
+            if response["trace_state"] in {"ABSENT", "EXPIRED"}:
                 response["next_cursor"] = None
         except Exception:
             await self._release(page.snapshot_id)
@@ -311,8 +321,14 @@ def _normalize(
     if set(names) - allowed:
         raise QueryError(QueryErrorCode.INVALID_FILTER, "unknown query parameter")
     values = dict(pairs)
-    if any("," in value or "*" in value for value in values.values()):
-        raise QueryError(QueryErrorCode.INVALID_FILTER, "list and wildcard filters are prohibited")
+    if any(
+        any(
+            character in ",*%\\" or ord(character) < 32 or ord(character) == 127
+            for character in value
+        )
+        for value in values.values()
+    ):
+        raise QueryError(QueryErrorCode.INVALID_FILTER, "operator-like filter bytes are prohibited")
     try:
         limit = int(values.get("limit", DEFAULT_PAGE_LIMIT))
     except ValueError as error:
@@ -321,7 +337,12 @@ def _normalize(
         raise QueryError(QueryErrorCode.INVALID_FILTER, "limit is outside [1,200]")
     cursor = values.get("cursor")
     _validate_filter_values(values, route=route)
-    normalized = tuple(sorted((name, value) for name, value in pairs if name != "cursor"))
+    normalized_values = {name: value for name, value in pairs if name not in {"cursor", "limit"}}
+    normalized_values["limit"] = str(limit)
+    for name in ("recorded_from", "recorded_to"):
+        if name in normalized_values:
+            normalized_values[name] = _timestamp(_parse_utc(normalized_values[name]))
+    normalized = tuple(sorted(normalized_values.items()))
     return normalized, cursor, limit
 
 
@@ -419,7 +440,13 @@ def _truth(
         completeness=completeness,
         availability=availability,
         expiry=ExpiryState.EXPIRED if expiry is not None else ExpiryState.ACTIVE,
-        expires_at=None if ttl is None else effect.recorded_at + ttl,
+        expires_at=(
+            expiry.expires_at
+            if expiry is not None
+            else None
+            if ttl is None
+            else effect.recorded_at + ttl
+        ),
     )
     return {
         "completeness": truth.completeness.value if truth.completeness else None,
@@ -448,7 +475,7 @@ def _fields(effect: QueryEffect) -> list[dict[str, Any]]:
 
 def _owned_attributes(effect: QueryEffect) -> Mapping[str, Any]:
     source = _projected_attributes(effect)
-    if effect.kind in {"factual_contribution", "finding_assertion", "role_lineage"}:
+    if effect.kind in {"factual_contribution", "finding_assertion"}:
         return source
     owned = {
         "finding_target": {
@@ -460,6 +487,7 @@ def _owned_attributes(effect: QueryEffect) -> Mapping[str, Any]:
         },
         "finding_status": {
             "agentops.finding.id",
+            "agentops.finding.scope.id",
             "agentops.finding.status",
             "agentops.review.id",
             "agentops.writer.role.id",
@@ -479,11 +507,25 @@ def _owned_attributes(effect: QueryEffect) -> Mapping[str, Any]:
         },
         "finding_recheck": {
             "agentops.finding.id",
+            "agentops.finding.scope.id",
             "agentops.recheck.id",
+            "agentops.review.id",
             "agentops.recheck.review.id",
             "agentops.recheck.finding.id",
             "agentops.recheck.fix.id",
             "agentops.iteration.id",
+            "agentops.writer.role.id",
+            "agentops.writer.invocation.id",
+            "agentops.reviewer.role.id",
+            "agentops.reviewer.invocation.id",
+            "agentops.recheck.role.id",
+            "agentops.recheck.invocation.id",
+        },
+        "role_lineage": {
+            "agentops.family.schema",
+            "agentops.role.id",
+            "agentops.role.lineage.id",
+            "agentops.parent.role.id",
         },
         "delivery_root_binding": {
             "agentops.delivery.id",
@@ -532,6 +574,7 @@ def _projected_attributes(effect: QueryEffect) -> dict[str, Any]:
     if effect.kind == "finding_fix":
         return {
             "agentops.finding.id": effect.key[0],
+            "agentops.finding.scope.id": effect.key[1],
             "agentops.fix.id": effect.key[5],
             "agentops.fix.finding.id": effect.payload["finding_id"],
             "agentops.review.id": effect.payload["review_id"],
@@ -543,6 +586,7 @@ def _projected_attributes(effect: QueryEffect) -> dict[str, Any]:
     if effect.kind == "finding_recheck":
         attributes = {
             "agentops.finding.id": effect.key[0],
+            "agentops.finding.scope.id": effect.key[1],
             "agentops.recheck.id": effect.key[5],
             "agentops.review.id": effect.payload["review_id"],
             "agentops.recheck.review.id": effect.payload["prior_review_id"],
@@ -588,9 +632,13 @@ def _compatibility(effect: QueryEffect) -> dict[str, Any]:
         "review.summary": ("C13", "C14"),
     }
     coordinate_fields = coordinate_map.get(event_name, ()) if event_name is not None else ()
+    if effect.kind == "finding_assertion":
+        coordinate_fields = ("C13", "C14")
+    elif effect.kind == "model_attribution":
+        coordinate_fields = ("gen_ai.provider.name", "C57", "C30", "C06")
     inverse = {field_id: name for name, field_id in FIELD_IDS.items()}
     for field_id in coordinate_fields:
-        name = inverse[field_id]
+        name = inverse.get(field_id, field_id)
         if name in attributes:
             dimensions.append({"field": field_id, "value": attributes[name]})
     return {
@@ -605,29 +653,58 @@ def _relationships(effect: QueryEffect) -> list[dict[str, Any]]:
     a = _projected_attributes(effect)
     if effect.kind == "finding_target":
         return [
-            {"kind": "FINDING_TARGET", "from": list(effect.key[:2]), "to": list(effect.key[2:])}
+            {
+                "kind": "FINDING_TARGET",
+                "from": _endpoint("FINDING", effect.key[:2]),
+                "to": _endpoint("FINDING_TARGET", effect.key),
+            }
         ]
     if effect.kind == "finding_fix":
-        return [{"kind": "FINDING_FIX", "from": list(effect.key[:5]), "to": effect.key[5]}]
+        return [
+            {
+                "kind": "FINDING_FIX",
+                "from": _endpoint("FIX", (effect.key[5],)),
+                "to": _endpoint("FINDING_TARGET", effect.key[:5]),
+            }
+        ]
     if effect.kind == "finding_recheck":
-        return [{"kind": "FINDING_RECHECK", "from": list(effect.key[:5]), "to": effect.key[5]}]
+        return [
+            {
+                "kind": "FINDING_RECHECK",
+                "from": _endpoint("RECHECK", (effect.key[5],)),
+                "to": _endpoint("FINDING_TARGET", effect.key[:5]),
+            }
+        ]
     if effect.kind == "role_lineage":
         return [
             {
                 "kind": "ROLE_LINEAGE",
-                "from": a.get("agentops.role.id"),
-                "to": a.get("agentops.role.lineage.id"),
+                "from": _endpoint("ROLE", (effect.key[0], a.get("agentops.role.id"))),
+                "to": _endpoint("ROLE_LINEAGE", (effect.key[0], a.get("agentops.role.lineage.id"))),
             }
         ]
     if effect.kind == "delivery_root_binding":
+        source = _source(effect)
         return [
-            {"kind": "DELIVERY_ROOT", "from": effect.key[0], "to": effect.payload["delivery_id"]}
+            {
+                "kind": "DELIVERY_ROOT",
+                "from": _endpoint("SPAN", (source["trace_id"], source["span_id"])),
+                "to": _endpoint("DELIVERY", (effect.payload["delivery_id"],)),
+            }
         ]
     if effect.kind == "model_attribution":
         return [
-            {"kind": "MODEL_ATTRIBUTION", "from": list(effect.key[4:]), "to": list(effect.key[:4])}
+            {
+                "kind": "MODEL_ATTRIBUTION",
+                "from": _endpoint("SPAN", effect.key[4:]),
+                "to": _endpoint("MODEL_ROLE", effect.key[:4]),
+            }
         ]
     return []
+
+
+def _endpoint(kind: str, key: Sequence[Any]) -> dict[str, Any]:
+    return {"kind": kind, "key": list(key)}
 
 
 def _fact_resource(
