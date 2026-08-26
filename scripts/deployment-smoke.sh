@@ -3,6 +3,7 @@ set -eu
 
 project_name="wsr-evidence-deployment"
 smoke_dir="$(mktemp -d)"
+chmod 700 "$smoke_dir"
 compose_file="deployment/compose.yaml"
 restore_container=""
 request_base64="CuECCi8KFQoMc2VydmljZS5uYW1lEgUKA2RzaAoWCg9zZXJ2aWNlLnZlcnNpb24SAwoBMRKtAgokChtpby5hZ2VudG9wcy5kc2gub2JzZXJ2YXRpb24SBTEuMC4wEtsBMh4KEWFnZW50b3BzLmV2ZW50LmlkEgkKB2V2ZW50LTEyLAoYYWdlbnRvcHMud29ya2Zsb3cuZmFtaWx5EhAKDmltcGxlbWVudGF0aW9uMiwKFmFnZW50b3BzLmZhbWlseS5zY2hlbWESEgoQaW1wbGVtZW50YXRpb25AMTIoChlhZ2VudG9wcy5kZWxpdmVyeS5vdXRjb21lEgsKCUNPTVBMRVRFRDIhChZhZ2VudG9wcy5zdW1tYXJ5LnN0YXRlEgcKBUZJTkFMYhBkZWxpdmVyeS5zdW1tYXJ5GidodHRwczovL29wZW50ZWxlbWV0cnkuaW8vc2NoZW1hcy8xLjQxLjA="
@@ -10,7 +11,10 @@ request_base64="CuECCi8KFQoMc2VydmljZS5uYW1lEgUKA2RzaAoWCg9zZXJ2aWNlLnZlcnNpb24S
 printf '%s\n' "smoke-admin-$(openssl rand -hex 16)" > "$smoke_dir/admin-password"
 printf '%s\n' "smoke-runtime-$(openssl rand -hex 16)" > "$smoke_dir/runtime-password"
 printf '%s\n' "smoke-backup-$(openssl rand -hex 16)" > "$smoke_dir/backup-password"
-chmod 600 "$smoke_dir"/*-password
+# Compose file-backed secrets are bind mounts on Linux and retain host ownership.
+# The private parent directory protects the files on the host; the files themselves
+# must remain readable after the database image drops from root to its postgres user.
+chmod 644 "$smoke_dir"/*-password
 export WSR_EVIDENCE_ADMIN_PASSWORD_FILE="$smoke_dir/admin-password"
 export WSR_EVIDENCE_RUNTIME_PASSWORD_FILE="$smoke_dir/runtime-password"
 export WSR_EVIDENCE_BACKUP_PASSWORD_FILE="$smoke_dir/backup-password"

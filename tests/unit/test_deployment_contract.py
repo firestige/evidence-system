@@ -29,3 +29,11 @@ def test_backup_and_restore_are_explicit_operations() -> None:
     assert (ROOT / "deployment" / "postgres" / "backup.sh").is_file()
     assert (ROOT / "deployment" / "postgres" / "restore.sh").is_file()
     assert (ROOT / "docs" / "operations.md").is_file()
+
+
+def test_smoke_secrets_are_container_readable_behind_a_private_host_directory() -> None:
+    smoke = (ROOT / "scripts" / "deployment-smoke.sh").read_text(encoding="utf-8")
+
+    assert 'chmod 700 "$smoke_dir"' in smoke
+    assert 'chmod 644 "$smoke_dir"/*-password' in smoke
+    assert 'chmod 600 "$smoke_dir"/*-password' not in smoke
