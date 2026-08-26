@@ -26,7 +26,7 @@ from wsr_evidence.storage.read_model import (
     TraceSummary,
 )
 
-MANIFEST_DIGEST = "4d048b0a0a7b66fd7645a96f8bc3013ce1a695b22ad5c8b48eb6cecbe6b2e55f"
+MANIFEST_DIGEST = "e95306895003c56a64b8aafef1d795dc9e42188f6c27bc574652efbcc66aa52b"
 GOLDEN = Path(__file__).parents[1] / "fixtures" / "wave7_fact_response.json"
 
 

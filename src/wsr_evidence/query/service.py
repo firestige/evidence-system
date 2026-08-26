@@ -28,7 +28,7 @@ from wsr_evidence.storage.read_model import (
     TruthState,
 )
 
-WAVE6_INPUT_MANIFEST_SHA256 = "4d048b0a0a7b66fd7645a96f8bc3013ce1a695b22ad5c8b48eb6cecbe6b2e55f"
+WAVE6_INPUT_MANIFEST_SHA256 = "e95306895003c56a64b8aafef1d795dc9e42188f6c27bc574652efbcc66aa52b"
 
 FACT_KINDS = {
     "factual_contribution": "EVENT_CONTRIBUTION",
