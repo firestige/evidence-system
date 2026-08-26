@@ -286,7 +286,15 @@ async def test_trace_query_returns_only_recorded_node_and_link_without_inference
             "span_status": "OK",
             "span_flags": 1,
             "trace_state": None,
-            "attributes": {"agentops.role.id": "worker", "arbitrary": "hidden"},
+            "attributes": {
+                "gen_ai.request.model": "requested",
+                "agentops.model.id": "canonical",
+                "agentops.runtime.id": "runtime",
+                "gen_ai.operation.name": "chat",
+                "agentops.role.id": "worker",
+                "gen_ai.provider.name": "provider",
+                "arbitrary": "hidden",
+            },
         },
         **common,
     )
@@ -308,7 +316,14 @@ async def test_trace_query_returns_only_recorded_node_and_link_without_inference
     assert response["trace_state"] == "AVAILABLE"
     assert response["trace_summaries"] == [{"trace_id": trace_id, "state": "AVAILABLE"}]
     assert [item["kind"] for item in response["items"]] == ["NODE", "LINK"]
-    assert response["items"][0]["node"]["fields"] == [{"field": "C30", "value": "worker"}]
+    assert response["items"][0]["node"]["fields"] == [
+        {"field": "C06", "value": "runtime"},
+        {"field": "C30", "value": "worker"},
+        {"field": "C57", "value": "canonical"},
+        {"field": "gen_ai.operation.name", "value": "chat"},
+        {"field": "gen_ai.provider.name", "value": "provider"},
+        {"field": "gen_ai.request.model", "value": "requested"},
+    ]
     assert response["items"][0]["edge"] is None
     assert response["items"][1]["node"] is None
     assert response["items"][1]["edge"] == {
@@ -655,6 +670,16 @@ async def test_cursor_binding_normalizes_default_limit_order_and_utc_spelling() 
 
 
 @pytest.mark.asyncio
+async def test_timestamp_filter_rejects_precision_that_cannot_be_normalized_exactly() -> None:
+    service = QueryService(FakeReadModel((review_summary(observed_count=0),)))
+
+    with pytest.raises(QueryError) as captured:
+        await service.facts({"recorded_from": "2026-08-26T01:02:03.0000001Z"})
+
+    assert captured.value.code is QueryErrorCode.INVALID_FILTER
+
+
+@pytest.mark.asyncio
 async def test_http_query_is_json_read_only_and_rejects_unknown_filters_and_bodies() -> None:
     service = QueryService(FakeReadModel((review_summary(observed_count=0),)))
     transport = ASGITransport(app=create_app(query_service=service))
@@ -670,6 +695,15 @@ async def test_http_query_is_json_read_only_and_rejects_unknown_filters_and_bodi
         )
         invalid_q = await client.get(
             "/v1/evidence/facts", headers={"accept": "application/json;q=1.001"}
+        )
+        shorthand_q = await client.get(
+            "/v1/evidence/facts", headers={"accept": "application/json;q=.5"}
+        )
+        quoted_q = await client.get(
+            "/v1/evidence/facts", headers={"accept": 'application/json;q="0.5"'}
+        )
+        repeated_q = await client.get(
+            "/v1/evidence/facts", headers={"accept": "application/json;q=0;q=1"}
         )
         unlisted_method = await client.request("BREW", "/v1/evidence/facts")
 
@@ -688,5 +722,8 @@ async def test_http_query_is_json_read_only_and_rejects_unknown_filters_and_bodi
     assert excluded.json()["error"]["code"] == "NOT_ACCEPTABLE"
     assert excluded_q.status_code == 406
     assert invalid_q.status_code == 406
+    assert shorthand_q.status_code == 406
+    assert quoted_q.status_code == 406
+    assert repeated_q.status_code == 406
     assert unlisted_method.status_code == 405
     assert unlisted_method.json()["error"]["code"] == "METHOD_NOT_ALLOWED"

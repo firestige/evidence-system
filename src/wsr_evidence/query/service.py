@@ -347,7 +347,7 @@ def _normalize(
 
 
 def _parse_utc(value: str) -> datetime:
-    if not value.endswith("Z"):
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z", value):
         raise QueryError(QueryErrorCode.INVALID_FILTER, "recorded bounds must be UTC timestamps")
     try:
         parsed = datetime.fromisoformat(value.removesuffix("Z") + "+00:00")
@@ -470,7 +470,14 @@ def _fields(effect: QueryEffect) -> list[dict[str, Any]]:
         ):
             continue
         fields.append({"field": field_id, "value": value})
-    return sorted(fields, key=lambda field: str(field["field"]))
+    return sorted(fields, key=lambda field: _field_sort_key(str(field["field"])))
+
+
+def _field_sort_key(field: str) -> tuple[int, int, str]:
+    match = re.fullmatch(r"([CIS])(\d{2})", field)
+    if match:
+        return ({"C": 0, "I": 1, "S": 2}[match.group(1)], int(match.group(2)), "")
+    return (3, 0, field)
 
 
 def _owned_attributes(effect: QueryEffect) -> Mapping[str, Any]:
@@ -758,11 +765,14 @@ def _trace_resource(effect: QueryEffect, *, ttl: timedelta | None) -> dict[str, 
     if kind == "NODE":
         node = {**effect.payload, "span_id": effect.key[1]}
         attributes = node.pop("attributes", {})
-        node["fields"] = [
-            {"field": FIELD_IDS.get(name, name), "value": value}
-            for name, value in sorted(attributes.items())
-            if name in FIELD_IDS or name.startswith("gen_ai.")
-        ]
+        node["fields"] = sorted(
+            [
+                {"field": FIELD_IDS.get(name, name), "value": value}
+                for name, value in attributes.items()
+                if name in FIELD_IDS or name.startswith("gen_ai.")
+            ],
+            key=lambda field: _field_sort_key(str(field["field"])),
+        )
     elif kind == "PARENT_EDGE":
         edge = {
             "from": {"trace_id": trace_id, "span_id": effect.key[1]},

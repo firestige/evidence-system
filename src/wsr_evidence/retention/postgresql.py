@@ -142,8 +142,14 @@ class PostgresRetentionMaintenance:
                       ON marker.resource_class = 'RAW_DEBUG'
                      AND marker.resource_kind = 'RAW_DEBUG'
                      AND marker.owner_key = ar.identity_key
-                    WHERE ar.accepted_at <= %s AND marker.owner_key IS NULL
-                    ORDER BY ar.identity_key
+                    WHERE ar.accepted_at <= %s
+                      AND marker.owner_key IS NULL
+                      AND EXISTS (
+                          SELECT 1 FROM projection_effects pe
+                          WHERE pe.source_identity_kind = ar.identity_kind
+                            AND pe.source_identity_key = ar.identity_key
+                      )
+                    ORDER BY ar.identity_key COLLATE "C"
                     LIMIT %s
                     """,
                     (cutoff, limit),
@@ -163,7 +169,7 @@ class PostgresRetentionMaintenance:
                     WHERE pe.effect_kind = ANY(%s)
                       AND pe.recorded_at <= %s
                       AND marker.owner_key IS NULL
-                    ORDER BY ({PUBLIC_KIND_SQL}), pe.effect_key
+                    ORDER BY ({PUBLIC_KIND_SQL}) COLLATE "C", pe.effect_key COLLATE "C"
                     LIMIT %s
                     """,
                     (resource_class.value, list(kinds), cutoff, limit),

@@ -218,6 +218,16 @@ async def test_retention_lifecycles_are_independent_idempotent_and_queryable() -
         async with await psycopg.AsyncConnection.connect(database_url) as connection:
             await connection.execute("UPDATE accepted_records SET accepted_at = %s", (old,))
             await connection.execute("UPDATE projection_effects SET recorded_at = %s", (old,))
+            await connection.execute(
+                """
+                INSERT INTO accepted_records
+                    (identity_kind, identity_key, canonical_digest, profile_version,
+                     family_schema, logical_record, accepted_at)
+                VALUES ('event', '["event","accepted-without-projection"]', %s,
+                        '1.0.0', NULL, '{}'::jsonb, %s)
+                """,
+                ("f" * 64, old),
+            )
 
         raw = await maintenance.plan_expiry(
             resource_class=ResourceClass.RAW_DEBUG,
@@ -230,6 +240,9 @@ async def test_retention_lifecycles_are_independent_idempotent_and_queryable() -
         repeated_raw = await maintenance.apply_expiry(batch=raw, clock_now=now)
         assert first_raw.expired == 2
         assert repeated_raw.already_expired == 2
+        assert all(
+            member.owner_key != ("event", "accepted-without-projection") for member in raw.members
+        )
 
         async with await psycopg.AsyncConnection.connect(database_url) as connection:
             rows = await connection.execute(

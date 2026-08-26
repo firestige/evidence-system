@@ -63,13 +63,15 @@ def _accepts_json(header: str) -> bool:
     for entry in header.lower().split(","):
         parts = [part.strip() for part in entry.split(";")]
         quality = 1.0
-        for parameter in parts[1:]:
-            if parameter.startswith("q="):
-                raw_quality = parameter.removeprefix("q=")
-                if re.fullmatch(r"(?:0(?:\.\d{1,3})?|1(?:\.0{1,3})?)", raw_quality):
-                    quality = float(raw_quality)
-                else:
-                    quality = 0.0
+        quality_parameters = [parameter for parameter in parts[1:] if parameter.startswith("q=")]
+        if len(quality_parameters) > 1:
+            quality = 0.0
+        elif quality_parameters:
+            raw_quality = quality_parameters[0].removeprefix("q=")
+            if re.fullmatch(r"(?:0(?:\.\d{1,3})?|1(?:\.0{1,3})?)", raw_quality):
+                quality = float(raw_quality)
+            else:
+                quality = 0.0
         if quality > 0 and parts[0] in {"*/*", "application/*", "application/json"}:
             return True
     return False
