@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import UTC, datetime
 from typing import Any
@@ -13,7 +14,9 @@ from wsr_evidence.app import create_app
 from wsr_evidence.query.faults import SnapshotError, SnapshotFault
 from wsr_evidence.query.postgresql import PostgresQueryReadModel
 from wsr_evidence.query.service import QueryService
+from wsr_evidence.retention.postgresql import PostgresRetentionMaintenance
 from wsr_evidence.storage.postgresql import PostgresStorage
+from wsr_evidence.storage.read_model import ExpiryBatch, ExpiryOwner, ResourceClass
 
 
 def sampling_record(event_id: str) -> dict[str, Any]:
@@ -70,7 +73,9 @@ def span_record(trace_id: str, *, delivery_id: str = "delivery-1") -> dict[str, 
 
 async def clear_core(database_url: str) -> None:
     async with await psycopg.AsyncConnection.connect(database_url) as connection:
-        await connection.execute("TRUNCATE projection_effects, accepted_records")
+        await connection.execute(
+            "TRUNCATE retention_expiry_markers, projection_effects, accepted_records"
+        )
 
 
 @pytest.mark.integration
@@ -181,6 +186,259 @@ async def test_raw_debug_scrub_does_not_change_projection_filters() -> None:
 
         traces = await service.traces({"delivery_id": "delivery-1", "limit": "10"})
         assert [item["kind"] for item in traces["items"]] == ["NODE", "PARENT_EDGE", "LINK"]
+    finally:
+        await query_storage.close()
+        await storage.close()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_retention_lifecycles_are_independent_idempotent_and_queryable() -> None:
+    database_url = os.environ.get("WSR_EVIDENCE_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("WSR_EVIDENCE_DATABASE_URL is not configured")
+    await clear_core(database_url)
+    storage = await PostgresStorage.open(database_url)
+    query_storage = PostgresQueryReadModel.from_storage(storage)
+    maintenance = PostgresRetentionMaintenance.from_storage(storage)
+    admission = AdmissionService(storage)
+    now = datetime(2026, 8, 26, 12, tzinfo=UTC)
+    old = datetime(2025, 1, 1, tzinfo=UTC)
+    trace_id = "0" * 31 + "1"
+    try:
+        assert (
+            await admission.admit(sampling_record("sampling-old"))
+        ).disposition is Disposition.ACCEPTED
+        assert (await admission.admit(span_record(trace_id))).disposition is Disposition.ACCEPTED
+        async with await psycopg.AsyncConnection.connect(database_url) as connection:
+            await connection.execute("UPDATE accepted_records SET accepted_at = %s", (old,))
+            await connection.execute("UPDATE projection_effects SET recorded_at = %s", (old,))
+
+        raw = await maintenance.plan_expiry(
+            resource_class=ResourceClass.RAW_DEBUG,
+            policy_revision="1.0.0",
+            cutoff=now,
+            limit=10,
+        )
+        first_raw = await maintenance.apply_expiry(batch=raw, clock_now=now)
+        repeated_raw = await maintenance.apply_expiry(batch=raw, clock_now=now)
+        assert first_raw.expired == 2
+        assert repeated_raw.already_expired == 2
+
+        async with await psycopg.AsyncConnection.connect(database_url) as connection:
+            rows = await connection.execute(
+                "SELECT logical_record, canonical_digest FROM accepted_records"
+            )
+            accepted = await rows.fetchall()
+        assert all(logical == {} for logical, _ in accepted)
+        assert all(len(digest) == 64 for _, digest in accepted)
+        assert (
+            await admission.admit(sampling_record("sampling-old"))
+        ).disposition is Disposition.DUPLICATE
+        conflicting = sampling_record("sampling-old")
+        conflicting["attributes"]["agentops.sampling.probability"] = 1.0
+        assert (await admission.admit(conflicting)).disposition is Disposition.CONFLICT
+
+        active_facts = await QueryService(query_storage).facts({"event_name": "sampling.decision"})
+        assert active_facts["items"][0]["truth"]["expiry"] == "ACTIVE"
+
+        pre_expiry_snapshot = await query_storage.acquire_snapshot(
+            query="FACTS",
+            filters=(("event_name", "sampling.decision"),),
+            limit=10,
+            clock_now=now,
+        )
+        assert (
+            pre_expiry_snapshot.resources[0].payload["attributes"]["agentops.sampling.decision"]
+            == "DROP"
+        )
+
+        factual = await maintenance.plan_expiry(
+            resource_class=ResourceClass.FACTUAL_PROJECTION,
+            policy_revision="1.0.0",
+            cutoff=now,
+            limit=10,
+        )
+        concurrent_results = await asyncio.gather(
+            maintenance.apply_expiry(batch=factual, clock_now=now),
+            maintenance.apply_expiry(batch=factual, clock_now=now),
+        )
+        assert sorted(result.expired for result in concurrent_results) == [
+            0,
+            len(factual.members),
+        ]
+        assert sorted(result.already_expired for result in concurrent_results) == [
+            0,
+            len(factual.members),
+        ]
+        assert (
+            await query_storage.read_expiry(
+                resource_class=ResourceClass.FACTUAL_PROJECTION,
+                resource_kind="EVENT_CONTRIBUTION",
+                owner_key=pre_expiry_snapshot.resources[0].key,
+                snapshot_id=pre_expiry_snapshot.snapshot_id,
+            )
+            is None
+        )
+        await query_storage.release_snapshot(pre_expiry_snapshot.snapshot_id)
+        expired_facts = await QueryService(query_storage).facts({"event_name": "sampling.decision"})
+        assert expired_facts["items"][0]["fields"] == []
+        assert expired_facts["items"][0]["truth"]["expiry"] == "EXPIRED"
+        assert expired_facts["items"][0]["truth"]["availability"] == "UNAVAILABLE"
+
+        active_trace = await QueryService(query_storage).traces({"delivery_id": "delivery-1"})
+        assert active_trace["trace_state"] == "AVAILABLE"
+        trace = await maintenance.plan_expiry(
+            resource_class=ResourceClass.TRACE_DETAIL,
+            policy_revision="1.0.0",
+            cutoff=now,
+            limit=10,
+        )
+        await maintenance.apply_expiry(batch=trace, clock_now=now)
+        expired_trace = await QueryService(query_storage).traces({"delivery_id": "delivery-1"})
+        assert expired_trace["trace_state"] == "EXPIRED"
+        assert expired_trace["items"] == []
+
+        await query_storage.close()
+        query_storage = PostgresQueryReadModel.from_storage(storage)
+        restarted_trace = await QueryService(query_storage).traces({"delivery_id": "delivery-1"})
+        restarted_fact = await QueryService(query_storage).facts(
+            {"event_name": "sampling.decision"}
+        )
+        assert restarted_trace["trace_state"] == "EXPIRED"
+        assert restarted_fact["items"][0]["truth"]["expiry"] == "EXPIRED"
+
+        with pytest.raises(ValueError, match="accepted provenance"):
+            await maintenance.plan_expiry(
+                resource_class=ResourceClass.ACCEPTED_PROVENANCE,
+                policy_revision="1.0.0",
+                cutoff=now,
+                limit=10,
+            )
+    finally:
+        await query_storage.close()
+        await storage.close()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_retention_batch_failure_rolls_back_scrub_and_tombstone() -> None:
+    database_url = os.environ.get("WSR_EVIDENCE_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("WSR_EVIDENCE_DATABASE_URL is not configured")
+    await clear_core(database_url)
+    storage = await PostgresStorage.open(database_url)
+    maintenance = PostgresRetentionMaintenance.from_storage(storage)
+    admission = AdmissionService(storage)
+    now = datetime(2026, 8, 26, 12, tzinfo=UTC)
+    try:
+        assert (
+            await admission.admit(sampling_record("event-a"))
+        ).disposition is Disposition.ACCEPTED
+        batch = ExpiryBatch.create(
+            resource_class=ResourceClass.RAW_DEBUG,
+            policy_revision="1.0.0",
+            cutoff=now,
+            members=(
+                ExpiryOwner(resource_kind="RAW_DEBUG", owner_key=("event", "event-a")),
+                ExpiryOwner(resource_kind="RAW_DEBUG", owner_key=("event", "zz-missing")),
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match="disappeared"):
+            await maintenance.apply_expiry(batch=batch, clock_now=now)
+
+        async with await psycopg.AsyncConnection.connect(database_url) as connection:
+            raw = await connection.execute(
+                "SELECT logical_record FROM accepted_records WHERE identity_key = %s",
+                ('["event","event-a"]',),
+            )
+            marker = await connection.execute("SELECT count(*) FROM retention_expiry_markers")
+            raw_row = await raw.fetchone()
+            marker_row = await marker.fetchone()
+        assert raw_row is not None and raw_row[0] != {}
+        assert marker_row == (0,)
+    finally:
+        await storage.close()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_equal_owner_keys_expire_independently_by_public_resource_kind() -> None:
+    database_url = os.environ.get("WSR_EVIDENCE_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("WSR_EVIDENCE_DATABASE_URL is not configured")
+    await clear_core(database_url)
+    storage = await PostgresStorage.open(database_url)
+    query_storage = PostgresQueryReadModel.from_storage(storage)
+    maintenance = PostgresRetentionMaintenance.from_storage(storage)
+    now = datetime(2026, 8, 26, 12, tzinfo=UTC)
+    owner_key = ("same", "key")
+    key_json = '["same","key"]'
+    try:
+        async with await psycopg.AsyncConnection.connect(database_url) as connection:
+            await connection.execute(
+                """
+                INSERT INTO accepted_records
+                    (identity_kind, identity_key, canonical_digest, profile_version,
+                     family_schema, logical_record, accepted_at)
+                VALUES
+                    ('event', '["event","assertion"]', %s, '1.0.0',
+                     'system-design@1', '{}'::jsonb, %s),
+                    ('event', '["event","lineage"]', %s, '1.0.0',
+                     'system-design@1', '{}'::jsonb, %s)
+                """,
+                ("a" * 64, now, "b" * 64, now),
+            )
+            await connection.execute(
+                """
+                INSERT INTO projection_effects
+                    (effect_kind, effect_key, payload, source_identity_kind,
+                     source_identity_key, recorded_at)
+                VALUES
+                    ('finding_assertion', %s, '{}'::jsonb,
+                     'event', '["event","assertion"]', %s),
+                    ('role_lineage', %s, '{}'::jsonb,
+                     'event', '["event","lineage"]', %s)
+                """,
+                (key_json, now, key_json, now),
+            )
+
+        planned = await maintenance.plan_expiry(
+            resource_class=ResourceClass.FACTUAL_PROJECTION,
+            policy_revision="1.0.0",
+            cutoff=now,
+            limit=10,
+        )
+        assert {(member.resource_kind, member.owner_key) for member in planned.members} == {
+            ("FINDING_ASSERTION", owner_key),
+            ("ROLE_LINEAGE", owner_key),
+        }
+
+        assertion_only = ExpiryBatch.create(
+            resource_class=ResourceClass.FACTUAL_PROJECTION,
+            policy_revision="1.0.0",
+            cutoff=now,
+            members=(ExpiryOwner(resource_kind="FINDING_ASSERTION", owner_key=owner_key),),
+        )
+        await maintenance.apply_expiry(batch=assertion_only, clock_now=now)
+        snapshot = await query_storage.acquire_snapshot(
+            query="FACTS", filters=(), limit=10, clock_now=now
+        )
+        assertion_expiry = await query_storage.read_expiry(
+            resource_class=ResourceClass.FACTUAL_PROJECTION,
+            resource_kind="FINDING_ASSERTION",
+            owner_key=owner_key,
+            snapshot_id=snapshot.snapshot_id,
+        )
+        lineage_expiry = await query_storage.read_expiry(
+            resource_class=ResourceClass.FACTUAL_PROJECTION,
+            resource_kind="ROLE_LINEAGE",
+            owner_key=owner_key,
+            snapshot_id=snapshot.snapshot_id,
+        )
+        assert assertion_expiry is not None
+        assert lineage_expiry is None
     finally:
         await query_storage.close()
         await storage.close()

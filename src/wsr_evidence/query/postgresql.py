@@ -190,13 +190,40 @@ class PostgresQueryReadModel:
         self,
         *,
         resource_class: ResourceClass,
+        resource_kind: str,
         owner_key: OwnerKey,
         snapshot_id: str,
     ) -> ExpiryRecord | None:
-        del resource_class, owner_key
-        if snapshot_id not in self._leases:
+        lease = self._leases.get(snapshot_id)
+        if lease is None:
             raise SnapshotError(SnapshotFault.EXPIRED, "snapshot lease expired")
-        return None
+        async with lease.connection.cursor() as cursor:
+            await cursor.execute(
+                """
+                SELECT source_identity_kind, source_identity_key, resource_kind, recorded_at,
+                       compatibility, policy_revision, expired_at
+                FROM retention_expiry_markers
+                WHERE resource_class = %s AND resource_kind = %s AND owner_key = %s
+                """,
+                (
+                    resource_class.value,
+                    resource_kind,
+                    json.dumps(owner_key, ensure_ascii=False, separators=(",", ":")),
+                ),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return ExpiryRecord(
+            resource_class=resource_class,
+            owner_key=owner_key,
+            source_identity=(row[0], row[1]),
+            resource_kind=row[2],
+            recorded_at=row[3],
+            compatibility=tuple(tuple(pair) for pair in row[4]),
+            policy_revision=row[5],
+            expired_at=row[6],
+        )
 
     async def release_snapshot(self, snapshot_id: str) -> None:
         async with self._lease_guard:
@@ -331,15 +358,30 @@ class PostgresQueryReadModel:
                         SELECT root.effect_key::jsonb ->> 0
                         FROM projection_effects root
                         WHERE root.effect_kind = 'delivery_root_binding'
-                          AND root.payload ->> 'delivery_id' = %s
+                          AND (
+                              root.payload ->> 'delivery_id' = %s
+                              OR EXISTS (
+                                  SELECT 1 FROM retention_expiry_markers marker
+                                  WHERE marker.resource_class = 'FACTUAL_PROJECTION'
+                                    AND marker.owner_key = root.effect_key
+                                    AND marker.resource_kind = 'DELIVERY_ROOT_BINDING'
+                                    AND marker.compatibility @> %s::jsonb
+                              )
+                          )
                     )"""
                 )
-                parameters.append(value)
+                parameters.extend((value, json.dumps([["delivery_id", value]])))
             else:
                 clauses.append(
-                    "pe.effect_kind = 'delivery_root_binding' AND pe.payload ->> 'delivery_id' = %s"
+                    "pe.effect_kind = 'delivery_root_binding' AND "
+                    "(pe.payload ->> 'delivery_id' = %s OR EXISTS ("
+                    "SELECT 1 FROM retention_expiry_markers marker "
+                    "WHERE marker.resource_class = 'FACTUAL_PROJECTION' "
+                    "AND marker.owner_key = pe.effect_key "
+                    "AND marker.resource_kind = 'DELIVERY_ROOT_BINDING' "
+                    "AND marker.compatibility @> %s::jsonb))"
                 )
-                parameters.append(value)
+                parameters.extend((value, json.dumps([["delivery_id", value]])))
         elif name in {"recorded_from", "recorded_to"}:
             operator = ">=" if name == "recorded_from" else "<="
             clauses.append(f"pe.recorded_at {operator} %s")
@@ -359,10 +401,23 @@ class PostgresQueryReadModel:
                     SELECT root.effect_key::jsonb ->> 0
                     FROM projection_effects root
                     WHERE root.effect_kind = 'delivery_root_binding'
-                      AND root.payload ->> 'delivery_id' = %s
+                      AND (
+                          root.payload ->> 'delivery_id' = %s
+                          OR EXISTS (
+                              SELECT 1 FROM retention_expiry_markers marker
+                              WHERE marker.resource_class = 'FACTUAL_PROJECTION'
+                                AND marker.owner_key = root.effect_key
+                                AND marker.resource_kind = 'DELIVERY_ROOT_BINDING'
+                                AND marker.compatibility @> %s::jsonb
+                          )
+                      )
                   )
                 """,
-                (list(TRACE_EFFECT_KINDS), delivery_id),
+                (
+                    list(TRACE_EFFECT_KINDS),
+                    delivery_id,
+                    json.dumps([["delivery_id", delivery_id]]),
+                ),
             )
             row = await cursor.fetchone()
         if row is None or row[0] > 32:

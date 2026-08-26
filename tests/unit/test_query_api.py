@@ -20,10 +20,11 @@ from wsr_evidence.query.service import (
 from wsr_evidence.storage.read_model import (
     ExpiryRecord,
     ResourceClass,
+    RetentionPolicy,
     SnapshotPage,
 )
 
-MANIFEST_DIGEST = "2be7eac71854b0c37abec240e63a8ec4f97be44ee7dd9990a2714eb106b72a9d"
+MANIFEST_DIGEST = "4d048b0a0a7b66fd7645a96f8bc3013ce1a695b22ad5c8b48eb6cecbe6b2e55f"
 GOLDEN = Path(__file__).parents[1] / "fixtures" / "wave7_fact_response.json"
 
 
@@ -148,6 +149,18 @@ async def test_fact_query_preserves_explicit_zero_and_manifest_binding() -> None
 
 
 @pytest.mark.asyncio
+async def test_query_expiry_instant_uses_the_configured_physical_ttl() -> None:
+    service = QueryService(
+        FakeReadModel((review_summary(observed_count=0),)),
+        retention_policy=RetentionPolicy(factual_projection_ttl=timedelta(days=90)),
+    )
+
+    response = await service.facts({})
+
+    assert response["items"][0]["truth"]["expires_at"] == "2026-11-24T01:02:03.000000Z"
+
+
+@pytest.mark.asyncio
 async def test_raw_debug_scrub_does_not_change_projected_event_fact() -> None:
     effect = review_summary(observed_count=0)
 
@@ -205,9 +218,15 @@ async def test_expired_detail_is_unavailable_not_absent() -> None:
         resource_class=ResourceClass.FACTUAL_PROJECTION,
         owner_key=effect.key,
         source_identity=effect.source_identity,
-        resource_kind=effect.kind,
+        resource_kind="EVENT_CONTRIBUTION",
         recorded_at=effect.recorded_at,
-        compatibility=(),
+        compatibility=(
+            ("family_schema", "system-design@1"),
+            ("event_name", "review.summary"),
+            ("completeness", "FINAL"),
+            ("C13", "FRESH_READER"),
+            ("C14", "SYSTEM_DESIGN"),
+        ),
         policy_revision="1.0.0",
         expired_at=datetime(2027, 8, 27, tzinfo=UTC),
     )

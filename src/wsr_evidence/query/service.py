@@ -15,9 +15,7 @@ from wsr_evidence.clock import Clock, SystemClock
 from wsr_evidence.query.faults import SnapshotError, SnapshotFault
 from wsr_evidence.query.model import QueryEffect, SnapshotReleaser
 from wsr_evidence.storage.read_model import (
-    DEFAULT_FACTUAL_PROJECTION_TTL,
     DEFAULT_PAGE_LIMIT,
-    DEFAULT_TRACE_DETAIL_TTL,
     MAX_PAGE_LIMIT,
     Availability,
     Completeness,
@@ -25,11 +23,12 @@ from wsr_evidence.storage.read_model import (
     ExpiryState,
     QueryExpiryReadModel,
     ResourceClass,
+    RetentionPolicy,
     SnapshotPage,
     TruthState,
 )
 
-WAVE6_INPUT_MANIFEST_SHA256 = "2be7eac71854b0c37abec240e63a8ec4f97be44ee7dd9990a2714eb106b72a9d"
+WAVE6_INPUT_MANIFEST_SHA256 = "4d048b0a0a7b66fd7645a96f8bc3013ce1a695b22ad5c8b48eb6cecbe6b2e55f"
 
 FACT_KINDS = {
     "factual_contribution": "EVENT_CONTRIBUTION",
@@ -162,10 +161,14 @@ class QueryError(Exception):
 
 class QueryService:
     def __init__(
-        self, read_model: QueryExpiryReadModel[QueryEffect], clock: Clock | None = None
+        self,
+        read_model: QueryExpiryReadModel[QueryEffect],
+        clock: Clock | None = None,
+        retention_policy: RetentionPolicy | None = None,
     ) -> None:
         self._read_model = read_model
         self._clock = clock or SystemClock()
+        self._retention_policy = retention_policy or RetentionPolicy()
         self._cursor_bindings: dict[str, tuple[str, tuple[tuple[str, str], ...], int]] = {}
 
     async def facts(
@@ -178,10 +181,17 @@ class QueryService:
             for effect in page.resources:
                 expiry = await self._read_model.read_expiry(
                     resource_class=ResourceClass.FACTUAL_PROJECTION,
+                    resource_kind=FACT_KINDS[effect.kind],
                     owner_key=effect.key,
                     snapshot_id=page.snapshot_id,
                 )
-                items.append(_fact_resource(effect, expiry=expiry))
+                items.append(
+                    _fact_resource(
+                        effect,
+                        expiry=expiry,
+                        ttl=self._retention_policy.factual_projection_ttl,
+                    )
+                )
             response = _envelope(page, items)
         except Exception:
             await self._release(page.snapshot_id)
@@ -207,13 +217,14 @@ class QueryService:
             for effect in page.resources:
                 expiry = await self._read_model.read_expiry(
                     resource_class=ResourceClass.TRACE_DETAIL,
+                    resource_kind=TRACE_KINDS[effect.kind],
                     owner_key=effect.key,
                     snapshot_id=page.snapshot_id,
                 )
                 if expiry is not None:
                     expired = True
                     continue
-                items.append(_trace_resource(effect))
+                items.append(_trace_resource(effect, ttl=self._retention_policy.trace_detail_ttl))
             response = _envelope(page, items)
             response["trace_state"] = "AVAILABLE" if items else "EXPIRED" if expired else "ABSENT"
             if not items:
@@ -384,20 +395,31 @@ def _completeness(effect: QueryEffect) -> Completeness | None:
 
 
 def _truth(
-    effect: QueryEffect, *, trace: bool = False, expiry: ExpiryRecord | None = None
+    effect: QueryEffect,
+    *,
+    ttl: timedelta | None,
+    trace: bool = False,
+    expiry: ExpiryRecord | None = None,
 ) -> dict[str, str | None]:
-    completeness = None if trace else _completeness(effect)
+    if trace:
+        completeness = None
+    elif expiry is not None:
+        raw_completeness = dict(expiry.compatibility).get("completeness")
+        completeness = (
+            Completeness(cast(str, raw_completeness)) if raw_completeness is not None else None
+        )
+    else:
+        completeness = _completeness(effect)
     availability = (
         Availability.UNAVAILABLE
         if expiry is not None or completeness is Completeness.UNAVAILABLE
         else Availability.AVAILABLE
     )
-    ttl = DEFAULT_TRACE_DETAIL_TTL if trace else DEFAULT_FACTUAL_PROJECTION_TTL
     truth = TruthState(
         completeness=completeness,
         availability=availability,
         expiry=ExpiryState.EXPIRED if expiry is not None else ExpiryState.ACTIVE,
-        expires_at=effect.recorded_at + ttl,
+        expires_at=None if ttl is None else effect.recorded_at + ttl,
     )
     return {
         "completeness": truth.completeness.value if truth.completeness else None,
@@ -608,7 +630,9 @@ def _relationships(effect: QueryEffect) -> list[dict[str, Any]]:
     return []
 
 
-def _fact_resource(effect: QueryEffect, *, expiry: ExpiryRecord | None) -> dict[str, Any]:
+def _fact_resource(
+    effect: QueryEffect, *, expiry: ExpiryRecord | None, ttl: timedelta | None
+) -> dict[str, Any]:
     kind = FACT_KINDS.get(effect.kind)
     if kind is None:
         raise QueryError(QueryErrorCode.QUERY_INTERNAL, "unsupported factual projection kind")
@@ -623,14 +647,31 @@ def _fact_resource(effect: QueryEffect, *, expiry: ExpiryRecord | None) -> dict[
             "family_schema": effect.family_schema,
             "owner_key": list(effect.key),
         },
-        "compatibility": _compatibility(effect),
-        "truth": _truth(effect, expiry=expiry),
+        "compatibility": _expired_compatibility(expiry)
+        if expiry is not None
+        else _compatibility(effect),
+        "truth": _truth(effect, ttl=ttl, expiry=expiry),
         "fields": [] if expiry is not None else _fields(effect),
         "relationships": [] if expiry is not None else _relationships(effect),
     }
 
 
-def _trace_resource(effect: QueryEffect) -> dict[str, Any]:
+def _expired_compatibility(expiry: ExpiryRecord) -> dict[str, Any]:
+    values = dict(expiry.compatibility)
+    dimensions = [
+        {"field": field, "value": value}
+        for field, value in expiry.compatibility
+        if field not in {"family_schema", "event_name", "completeness", "delivery_id"}
+    ]
+    return {
+        "family_schema": values.get("family_schema"),
+        "event_name": values.get("event_name"),
+        "completeness": values.get("completeness"),
+        "dimensions": dimensions,
+    }
+
+
+def _trace_resource(effect: QueryEffect, *, ttl: timedelta | None) -> dict[str, Any]:
     kind = TRACE_KINDS.get(effect.kind)
     if kind is None:
         raise QueryError(QueryErrorCode.QUERY_INTERNAL, "unsupported Trace projection kind")
@@ -666,7 +707,7 @@ def _trace_resource(effect: QueryEffect) -> dict[str, Any]:
         "kind": kind,
         "source": _source(effect),
         "recorded_at": _timestamp(effect.recorded_at),
-        "truth": _truth(effect, trace=True),
+        "truth": _truth(effect, ttl=ttl, trace=True),
         "node": node,
         "edge": edge,
     }
