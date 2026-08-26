@@ -89,6 +89,9 @@ def test_workflows_keep_app_token_at_the_final_github_publish_boundary() -> None
     promote = (ROOT / ".github/workflows/release-promote.yml").read_text()
 
     assert "WSR_RELEASE_APP_PRIVATE_KEY" not in candidate
+    assert "push:" in candidate
+    assert "release/request.json" in candidate
+    assert "steps.request.outputs.candidate_tag" in candidate
     assert "workflow_call:" in candidate
     assert 'test "$GITHUB_REF_NAME" = "release/next"' in candidate
     assert "actions/create-github-app-token@" in promote

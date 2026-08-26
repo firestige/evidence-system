@@ -1,6 +1,9 @@
 name: Evidence release candidate
 
 on:
+  push:
+    branches:
+      - release/next
   workflow_dispatch:
     inputs:
       candidate_tag:
@@ -27,6 +30,21 @@ jobs:
     steps:
       - name: Verify release trigger branch
         run: test "$GITHUB_REF_NAME" = "release/next"
+      - name: Resolve immutable release request
+        id: request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPATCH_CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+        run: |
+          if test "$GITHUB_EVENT_NAME" = "push"; then
+            gh api "repos/$GITHUB_REPOSITORY/contents/release/request.json?ref=$GITHUB_SHA" \
+              --jq .content | base64 --decode > "$RUNNER_TEMP/release-request.json"
+            CANDIDATE_TAG="$(jq -er .candidate_tag "$RUNNER_TEMP/release-request.json")"
+          else
+            CANDIDATE_TAG="$DISPATCH_CANDIDATE_TAG"
+          fi
+          test -n "$CANDIDATE_TAG"
+          echo "candidate_tag=$CANDIDATE_TAG" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -38,7 +56,7 @@ jobs:
       - name: Verify candidate coordinate and collisions
         env:
           GH_TOKEN: ${{ github.token }}
-          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+          CANDIDATE_TAG: ${{ steps.request.outputs.candidate_tag }}
         run: |
           VERSION="$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
           case "$CANDIDATE_TAG" in "$VERSION"-rc.*) ;; *) exit 1 ;; esac
@@ -49,7 +67,7 @@ jobs:
       - name: Build and publish candidate OCI image
         env:
           GH_TOKEN: ${{ github.token }}
-          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+          CANDIDATE_TAG: ${{ steps.request.outputs.candidate_tag }}
         run: |
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           docker buildx build --push \
@@ -64,12 +82,12 @@ jobs:
       - name: Create RC only after local qualification
         env:
           GH_TOKEN: ${{ github.token }}
-          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+          CANDIDATE_TAG: ${{ steps.request.outputs.candidate_tag }}
         run: gh release create "$CANDIDATE_TAG" "$RUNNER_TEMP/local-release/"* --prerelease --target "$GITHUB_SHA"
       - name: Redownload and verify exact RC assets
         env:
           GH_TOKEN: ${{ github.token }}
-          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+          CANDIDATE_TAG: ${{ steps.request.outputs.candidate_tag }}
         run: |
           mkdir "$RUNNER_TEMP/remote-release"
           gh release download "$CANDIDATE_TAG" --dir "$RUNNER_TEMP/remote-release"
@@ -80,7 +98,7 @@ jobs:
       - name: Attach qualification evidence
         env:
           GH_TOKEN: ${{ github.token }}
-          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+          CANDIDATE_TAG: ${{ steps.request.outputs.candidate_tag }}
         run: |
           export CANDIDATE_TAG
           uv run python -c 'import hashlib,json,os,pathlib; p=pathlib.Path(os.environ["RUNNER_TEMP"]); m=(p/"remote-release/release-metadata.json").read_bytes(); d=json.loads(m); q={"schemaVersion":"wsr.release-qualification@1.0.0","candidateTag":os.environ["CANDIDATE_TAG"],"commit":os.environ["GITHUB_SHA"],"artifactMetadataSha256":"sha256:"+hashlib.sha256(m).hexdigest(),"ociDigest":d["ociDigest"],"localAcceptance":{"status":"PASS"},"remoteQualification":{"status":"PASS"}}; (p/"release-qualification.json").write_text(json.dumps(q,indent=2)+"\n")'
