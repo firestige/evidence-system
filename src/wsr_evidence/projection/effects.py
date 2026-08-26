@@ -84,6 +84,7 @@ def _project_span(record: ValidatedRecord) -> tuple[ProjectionEffect, ...]:
                     "runtime_id": record.attributes["agentops.runtime.id"],
                     "manifest_digest": record.attributes["agentops.manifest.digest"],
                     "family_schema": family_schema,
+                    "workflow_family": record.attributes["agentops.workflow.family"],
                 },
             )
         )

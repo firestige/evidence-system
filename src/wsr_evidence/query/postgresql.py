@@ -96,7 +96,6 @@ def _query_effect(row: tuple[Any, ...]) -> QueryEffect:
         accepted_digest=row[6],
         profile_version=row[7],
         family_schema=row[8],
-        logical_record=row[9],
     )
 
 
@@ -238,7 +237,7 @@ class PostgresQueryReadModel:
         next_cursor = None
         if len(rows) > lease.limit:
             last = selected[-1]
-            next_after = (last[10], last[11], last[12])
+            next_after = (last[9], last[10], last[11])
             cache_key = (lease.snapshot_id, *next_after)
             next_cursor = self._continuation_tokens.get(cache_key)
             if next_cursor is None:
@@ -277,7 +276,7 @@ class PostgresQueryReadModel:
         statement = f"""
             SELECT pe.effect_kind, pe.effect_key, pe.payload, pe.source_identity_kind,
                    pe.source_identity_key, pe.recorded_at, ar.canonical_digest,
-                   ar.profile_version, ar.family_schema, ar.logical_record,
+                   ar.profile_version, ar.family_schema,
                    {sort_columns[0]} AS sort_a,
                    {sort_columns[1]} AS sort_b,
                    {sort_columns[2]} AS sort_c
@@ -320,7 +319,9 @@ class PostgresQueryReadModel:
             clauses.append(
                 "pe.effect_key::jsonb ->> 0 = %s"
                 if query == "TRACES"
-                else "ar.logical_record ->> 'trace_id' = %s"
+                else (
+                    "pe.source_identity_kind = 'span' AND pe.source_identity_key::jsonb ->> 1 = %s"
+                )
             )
             parameters.append(value)
         elif name == "delivery_id":
@@ -336,10 +337,9 @@ class PostgresQueryReadModel:
                 parameters.append(value)
             else:
                 clauses.append(
-                    "(ar.logical_record -> 'attributes' ->> 'agentops.delivery.id' = %s "
-                    "OR pe.payload ->> 'delivery_id' = %s)"
+                    "pe.effect_kind = 'delivery_root_binding' AND pe.payload ->> 'delivery_id' = %s"
                 )
-                parameters.extend((value, value))
+                parameters.append(value)
         elif name in {"recorded_from", "recorded_to"}:
             operator = ">=" if name == "recorded_from" else "<="
             clauses.append(f"pe.recorded_at {operator} %s")

@@ -73,7 +73,6 @@ def review_summary(*, observed_count: int | None, state: str | None = "FINAL") -
         accepted_digest="a" * 64,
         profile_version="1.0.0",
         family_schema="system-design@1",
-        logical_record={"event_name": "review.summary", "attributes": attributes},
     )
 
 
@@ -149,6 +148,23 @@ async def test_fact_query_preserves_explicit_zero_and_manifest_binding() -> None
 
 
 @pytest.mark.asyncio
+async def test_raw_debug_scrub_does_not_change_projected_event_fact() -> None:
+    effect = review_summary(observed_count=0)
+
+    response = await QueryService(FakeReadModel((effect,))).facts({})
+
+    assert response["items"][0]["compatibility"] == {
+        "family_schema": "system-design@1",
+        "event_name": "review.summary",
+        "completeness": "FINAL",
+        "dimensions": [
+            {"field": "C13", "value": "FRESH_READER"},
+            {"field": "C14", "value": "SYSTEM_DESIGN"},
+        ],
+    }
+
+
+@pytest.mark.asyncio
 async def test_absent_c17_produces_no_observed_count_field() -> None:
     service = QueryService(FakeReadModel((review_summary(observed_count=None),)))
 
@@ -221,7 +237,6 @@ async def test_trace_query_returns_only_recorded_node_and_link_without_inference
         "accepted_digest": "b" * 64,
         "profile_version": "1.0.0",
         "family_schema": None,
-        "logical_record": {"record_type": "span", "attributes": {}},
     }
     node = QueryEffect(
         kind="trace_node",
@@ -271,27 +286,65 @@ async def test_relationship_fact_does_not_leak_unowned_source_fields() -> None:
     effect = QueryEffect(
         kind="finding_status",
         key=("finding-1", "scope-1", "review-1"),
-        payload={"status": "OPEN"},
+        payload={
+            "status": "OPEN",
+            "writer_role_id": "writer",
+            "writer_invocation_id": "writer-invocation",
+            "reviewer_role_id": "reviewer",
+            "reviewer_invocation_id": "reviewer-invocation",
+        },
         source_identity=("event", '["event","finding-event-1"]'),
         recorded_at=datetime(2026, 8, 26, 1, 2, 3, tzinfo=UTC),
         accepted_digest="c" * 64,
         profile_version="1.0.0",
         family_schema="system-design@1",
-        logical_record={
-            "event_name": "review.finding",
-            "attributes": {
-                "agentops.finding.id": "finding-1",
-                "agentops.finding.status": "OPEN",
-                "agentops.finding.summary": "must not be repeated by status projection",
-            },
-        },
     )
 
     response = await QueryService(FakeReadModel((effect,))).facts({})
 
     item = response["items"][0]
     assert item["compatibility"]["event_name"] is None
-    assert {field["field"] for field in item["fields"]} == {"C18", "C19"}
+    assert {field["field"] for field in item["fields"]} == {
+        "C12",
+        "C18",
+        "C19",
+        "C33",
+        "C34",
+        "C36",
+        "C37",
+    }
+
+
+@pytest.mark.asyncio
+async def test_raw_debug_scrub_does_not_change_projected_relationship_fact() -> None:
+    effect = QueryEffect(
+        kind="finding_status",
+        key=("finding-1", "scope-1", "review-1"),
+        payload={
+            "status": "OPEN",
+            "writer_role_id": "writer",
+            "writer_invocation_id": "writer-invocation",
+            "reviewer_role_id": "reviewer",
+            "reviewer_invocation_id": "reviewer-invocation",
+        },
+        source_identity=("event", '["event","finding-event-1"]'),
+        recorded_at=datetime(2026, 8, 26, 1, 2, 3, tzinfo=UTC),
+        accepted_digest="c" * 64,
+        profile_version="1.0.0",
+        family_schema="system-design@1",
+    )
+
+    response = await QueryService(FakeReadModel((effect,))).facts({})
+
+    assert {field["field"] for field in response["items"][0]["fields"]} == {
+        "C12",
+        "C18",
+        "C19",
+        "C33",
+        "C34",
+        "C36",
+        "C37",
+    }
 
 
 @pytest.mark.asyncio

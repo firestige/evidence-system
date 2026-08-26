@@ -12,6 +12,7 @@ from wsr_evidence.admission.service import AdmissionService, Disposition
 from wsr_evidence.app import create_app
 from wsr_evidence.query.faults import SnapshotError, SnapshotFault
 from wsr_evidence.query.postgresql import PostgresQueryReadModel
+from wsr_evidence.query.service import QueryService
 from wsr_evidence.storage.postgresql import PostgresStorage
 
 
@@ -146,6 +147,40 @@ async def test_trace_sort_is_node_parent_link_and_delivery_traversal_is_bounded(
                 clock_now=now,
             )
         assert exceeded.value.fault is SnapshotFault.BOUND_EXCEEDED
+    finally:
+        await query_storage.close()
+        await storage.close()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_raw_debug_scrub_does_not_change_projection_filters() -> None:
+    database_url = os.environ.get("WSR_EVIDENCE_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("WSR_EVIDENCE_DATABASE_URL is not configured")
+    await clear_core(database_url)
+    storage = await PostgresStorage.open(database_url)
+    query_storage = PostgresQueryReadModel.from_storage(storage)
+    admission = AdmissionService(storage)
+    trace_id = "0" * 31 + "1"
+    try:
+        admitted = await admission.admit(span_record(trace_id))
+        assert admitted.disposition is Disposition.ACCEPTED
+        async with await psycopg.AsyncConnection.connect(database_url) as connection:
+            await connection.execute("UPDATE accepted_records SET logical_record = '{}'::jsonb")
+
+        service = QueryService(query_storage)
+        facts = await service.facts({"trace_id": trace_id, "limit": "10"})
+        assert [item["kind"] for item in facts["items"]] == ["DELIVERY_ROOT_BINDING"]
+        assert {field["field"] for field in facts["items"][0]["fields"]} == {
+            "C01",
+            "C06",
+            "C07",
+            "C08",
+        }
+
+        traces = await service.traces({"delivery_id": "delivery-1", "limit": "10"})
+        assert [item["kind"] for item in traces["items"]] == ["NODE", "PARENT_EDGE", "LINK"]
     finally:
         await query_storage.close()
         await storage.close()

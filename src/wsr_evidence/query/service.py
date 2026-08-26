@@ -378,7 +378,7 @@ def _resource_id(effect: QueryEffect, kind: str) -> str:
 
 
 def _completeness(effect: QueryEffect) -> Completeness | None:
-    attributes = effect.logical_record.get("attributes", {})
+    attributes = _projected_attributes(effect)
     value = attributes.get("agentops.summary.state")
     return Completeness(value) if value is not None else None
 
@@ -425,12 +425,9 @@ def _fields(effect: QueryEffect) -> list[dict[str, Any]]:
 
 
 def _owned_attributes(effect: QueryEffect) -> Mapping[str, Any]:
-    source = effect.logical_record.get("attributes", {})
-    if effect.kind == "factual_contribution":
-        attributes = effect.payload.get("attributes")
-        return cast(dict[str, Any], attributes) if isinstance(attributes, dict) else {}
-    if effect.kind in {"finding_assertion", "role_lineage"}:
-        return effect.payload
+    source = _projected_attributes(effect)
+    if effect.kind in {"factual_contribution", "finding_assertion", "role_lineage"}:
+        return source
     owned = {
         "finding_target": {
             "agentops.finding.id",
@@ -483,11 +480,83 @@ def _owned_attributes(effect: QueryEffect) -> Mapping[str, Any]:
     return {name: source[name] for name in owned if name in source}
 
 
+def _projected_attributes(effect: QueryEffect) -> dict[str, Any]:
+    if effect.kind == "factual_contribution":
+        attributes = effect.payload.get("attributes")
+        return cast(dict[str, Any], attributes) if isinstance(attributes, dict) else {}
+    if effect.kind in {"finding_assertion", "role_lineage"}:
+        return dict(effect.payload)
+    if effect.kind == "finding_target":
+        attributes = {
+            "agentops.finding.id": effect.key[0],
+            "agentops.finding.scope.id": effect.key[1],
+            "agentops.finding.target.kind": effect.key[2],
+            "agentops.finding.target.id": effect.key[3],
+        }
+        if effect.key[4] is not None:
+            attributes["agentops.finding.target.artifact.id"] = effect.key[4]
+        return attributes
+    if effect.kind == "finding_status":
+        return {
+            "agentops.finding.id": effect.key[0],
+            "agentops.finding.scope.id": effect.key[1],
+            "agentops.review.id": effect.key[2],
+            "agentops.finding.status": effect.payload["status"],
+            "agentops.writer.role.id": effect.payload["writer_role_id"],
+            "agentops.writer.invocation.id": effect.payload["writer_invocation_id"],
+            "agentops.reviewer.role.id": effect.payload["reviewer_role_id"],
+            "agentops.reviewer.invocation.id": effect.payload["reviewer_invocation_id"],
+        }
+    if effect.kind == "finding_fix":
+        return {
+            "agentops.finding.id": effect.key[0],
+            "agentops.fix.id": effect.key[5],
+            "agentops.fix.finding.id": effect.payload["finding_id"],
+            "agentops.review.id": effect.payload["review_id"],
+            "agentops.writer.role.id": effect.payload["writer_role_id"],
+            "agentops.writer.invocation.id": effect.payload["writer_invocation_id"],
+            "agentops.reviewer.role.id": effect.payload["reviewer_role_id"],
+            "agentops.reviewer.invocation.id": effect.payload["reviewer_invocation_id"],
+        }
+    if effect.kind == "finding_recheck":
+        attributes = {
+            "agentops.finding.id": effect.key[0],
+            "agentops.recheck.id": effect.key[5],
+            "agentops.review.id": effect.payload["review_id"],
+            "agentops.recheck.review.id": effect.payload["prior_review_id"],
+            "agentops.recheck.finding.id": effect.payload["finding_id"],
+            "agentops.iteration.id": effect.payload["iteration_id"],
+            "agentops.writer.role.id": effect.payload["writer_role_id"],
+            "agentops.writer.invocation.id": effect.payload["writer_invocation_id"],
+            "agentops.reviewer.role.id": effect.payload["reviewer_role_id"],
+            "agentops.reviewer.invocation.id": effect.payload["reviewer_invocation_id"],
+            "agentops.recheck.role.id": effect.payload["recheck_role_id"],
+            "agentops.recheck.invocation.id": effect.payload["recheck_invocation_id"],
+        }
+        if effect.payload["fix_id"] is not None:
+            attributes["agentops.recheck.fix.id"] = effect.payload["fix_id"]
+        return attributes
+    if effect.kind == "delivery_root_binding":
+        return {
+            "agentops.delivery.id": effect.payload["delivery_id"],
+            "agentops.runtime.id": effect.payload["runtime_id"],
+            "agentops.manifest.digest": effect.payload["manifest_digest"],
+            "agentops.workflow.family": effect.payload["workflow_family"],
+        }
+    if effect.kind == "model_attribution":
+        return {
+            "gen_ai.provider.name": effect.key[0],
+            "agentops.model.id": effect.key[1],
+            "agentops.role.id": effect.key[2],
+            "agentops.runtime.id": effect.key[3],
+            "gen_ai.request.model": effect.payload["request_model"],
+        }
+    return {}
+
+
 def _compatibility(effect: QueryEffect) -> dict[str, Any]:
-    logical = effect.logical_record
-    attributes = logical.get("attributes", {})
-    raw_event_name = logical.get("event_name") if effect.kind == "factual_contribution" else None
-    event_name = raw_event_name if isinstance(raw_event_name, str) else None
+    attributes = _projected_attributes(effect)
+    event_name = str(effect.key[0]) if effect.kind == "factual_contribution" else None
     completeness = attributes.get("agentops.summary.state")
     dimensions: list[dict[str, Any]] = []
     coordinate_map = {
@@ -511,7 +580,7 @@ def _compatibility(effect: QueryEffect) -> dict[str, Any]:
 
 
 def _relationships(effect: QueryEffect) -> list[dict[str, Any]]:
-    a = effect.logical_record.get("attributes", {})
+    a = _projected_attributes(effect)
     if effect.kind == "finding_target":
         return [
             {"kind": "FINDING_TARGET", "from": list(effect.key[:2]), "to": list(effect.key[2:])}
