@@ -8,7 +8,7 @@ Validate locally with one command:
 uv run python -m release.cli.release config
 ```
 
-For an RC, first record the immutable Evidence product commit in the superproject unified candidate manifest. The selected superproject authority must also contain the FROZEN `evidence.query@0.1.0` publication record. Then advance the publisher tooling to `release/next` and dispatch **Evidence CI** on that branch with `release_candidate=true`, the RC tag, the exact superproject authority commit, and `release/candidates/iter4-wave11.json`.
+For an RC, first record the immutable Evidence product commit in the superproject unified candidate manifest. The selected superproject authority must also contain the FROZEN `evidence.query@0.1.0` publication record. Then advance the publisher tooling to `release/next` and dispatch **Evidence CI** on that branch with `release_candidate=true`, the RC tag, the exact superproject authority commit, and the current immutable authority manifest (for Iter4, `release/candidates/iter4-wave12.json`).
 
 The candidate workflow keeps three identities separate:
 

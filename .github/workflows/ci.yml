@@ -22,7 +22,7 @@ on:
       authority_manifest:
         description: Superproject-relative immutable unified candidate manifest
         required: false
-        default: release/candidates/iter4-wave11.json
+        default: release/candidates/iter4-wave12.json
         type: string
 
 permissions:
