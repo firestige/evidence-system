@@ -14,6 +14,7 @@ COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src ./src
 COPY alembic.ini ./
 COPY migrations ./migrations
+COPY deployment/run-with-database-secret.sh ./deployment/run-with-database-secret.sh
 
 RUN uv sync --frozen --no-dev --no-editable \
     && useradd --create-home --uid 10001 evidence \

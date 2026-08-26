@@ -5,6 +5,7 @@ import pytest
 from wsr_evidence.clock import FakeClock
 from wsr_evidence.retention.config import RetentionSettings
 from wsr_evidence.retention.postgresql import _projection_compatibility
+from wsr_evidence.retention.scheduler import run_retention_loop
 from wsr_evidence.retention.service import RetentionService
 from wsr_evidence.storage.read_model import (
     ExpiryBatch,
@@ -59,6 +60,31 @@ class FakeMaintenance:
             expired=1,
             already_expired=0,
         )
+
+
+class FakeRetentionRunner:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.ran = __import__("asyncio").Event()
+
+    async def run_once(self) -> tuple[ExpiryResult, ...]:
+        self.calls += 1
+        self.ran.set()
+        return ()
+
+
+@pytest.mark.asyncio
+async def test_retention_scheduler_runs_immediately_and_stops_by_cancellation() -> None:
+    import asyncio
+
+    runner = FakeRetentionRunner()
+    task = asyncio.create_task(run_retention_loop(runner, interval=timedelta(seconds=10)))
+    await asyncio.wait_for(runner.ran.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert runner.calls == 1
 
 
 @pytest.mark.asyncio

@@ -3,23 +3,35 @@ services:
     image: postgres:18.4-bookworm@sha256:882236b897e39051d2368c5ccc6cda944904723506b2dfc97f2a8f5bc9afa382
     environment:
       POSTGRES_DB: wsr_evidence
-      POSTGRES_HOST_AUTH_METHOD: trust
-      POSTGRES_USER: wsr_evidence
+      POSTGRES_PASSWORD_FILE: /run/secrets/admin_password
+      POSTGRES_USER: wsr_evidence_admin
+      WSR_EVIDENCE_BACKUP_PASSWORD_FILE: /run/secrets/backup_password
+      WSR_EVIDENCE_RUNTIME_PASSWORD_FILE: /run/secrets/runtime_password
+    secrets:
+      - admin_password
+      - backup_password
+      - runtime_password
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U wsr_evidence -d wsr_evidence"]
+      test: ["CMD-SHELL", "pg_isready -U wsr_evidence_admin -d wsr_evidence"]
       interval: 2s
       timeout: 3s
       retries: 20
     volumes:
       - evidence-data:/var/lib/postgresql
+      - ./postgres/init-roles.sh:/docker-entrypoint-initdb.d/10-wsr-roles.sh:ro
 
   migrate:
     build:
       context: ..
       dockerfile: deployment/Dockerfile
-    command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
+    command: ["/app/deployment/run-with-database-secret.sh", "uv", "run", "--no-sync", "alembic", "upgrade", "head"]
     environment:
-      WSR_EVIDENCE_DATABASE_URL: postgresql://wsr_evidence@database/wsr_evidence
+      WSR_EVIDENCE_DATABASE_HOST: database
+      WSR_EVIDENCE_DATABASE_NAME: wsr_evidence
+      WSR_EVIDENCE_DATABASE_PASSWORD_FILE: /run/secrets/admin_password
+      WSR_EVIDENCE_DATABASE_USER: wsr_evidence_admin
+    secrets:
+      - admin_password
     depends_on:
       database:
         condition: service_healthy
@@ -28,10 +40,17 @@ services:
     build:
       context: ..
       dockerfile: deployment/Dockerfile
+    command: ["/app/deployment/run-with-database-secret.sh", "wsr-evidence"]
     environment:
       WSR_EVIDENCE_BIND_SCOPE: container
-      WSR_EVIDENCE_DATABASE_URL: postgresql://wsr_evidence@database/wsr_evidence
+      WSR_EVIDENCE_DATABASE_HOST: database
+      WSR_EVIDENCE_DATABASE_NAME: wsr_evidence
+      WSR_EVIDENCE_DATABASE_PASSWORD_FILE: /run/secrets/runtime_password
+      WSR_EVIDENCE_DATABASE_USER: wsr_evidence_runtime
       WSR_EVIDENCE_HOST: 0.0.0.0
+      WSR_EVIDENCE_RETENTION_INTERVAL_SECONDS: ${WSR_EVIDENCE_RETENTION_INTERVAL_SECONDS:-60}
+    secrets:
+      - runtime_password
     ports:
       - "127.0.0.1:4318:4318"
     depends_on:
@@ -43,5 +62,53 @@ services:
       timeout: 3s
       retries: 20
 
+  backup:
+    profiles: ["operations"]
+    image: postgres:18.4-bookworm@sha256:882236b897e39051d2368c5ccc6cda944904723506b2dfc97f2a8f5bc9afa382
+    command: ["/opt/wsr/backup.sh"]
+    environment:
+      WSR_EVIDENCE_BACKUP_FILE: evidence.backup
+      WSR_EVIDENCE_DATABASE_HOST: database
+      WSR_EVIDENCE_DATABASE_NAME: wsr_evidence
+      WSR_EVIDENCE_DATABASE_PASSWORD_FILE: /run/secrets/backup_password
+      WSR_EVIDENCE_DATABASE_USER: wsr_evidence_backup
+    secrets:
+      - backup_password
+    volumes:
+      - evidence-backups:/backups
+      - ./postgres/backup.sh:/opt/wsr/backup.sh:ro
+      - ./postgres/state-digest.sh:/opt/wsr/state-digest.sh:ro
+    depends_on:
+      database:
+        condition: service_healthy
+
+  restore:
+    profiles: ["operations"]
+    image: postgres:18.4-bookworm@sha256:882236b897e39051d2368c5ccc6cda944904723506b2dfc97f2a8f5bc9afa382
+    command: ["/opt/wsr/restore.sh"]
+    environment:
+      WSR_EVIDENCE_BACKUP_FILE: evidence.backup
+      WSR_EVIDENCE_DATABASE_HOST: database
+      WSR_EVIDENCE_DATABASE_PASSWORD_FILE: /run/secrets/admin_password
+      WSR_EVIDENCE_DATABASE_USER: wsr_evidence_admin
+      WSR_EVIDENCE_RESTORE_DATABASE: wsr_evidence_restore_verified
+    secrets:
+      - admin_password
+    volumes:
+      - evidence-backups:/backups:ro
+      - ./postgres/restore.sh:/opt/wsr/restore.sh:ro
+    depends_on:
+      database:
+        condition: service_healthy
+
+secrets:
+  admin_password:
+    file: ${WSR_EVIDENCE_ADMIN_PASSWORD_FILE:-./.secrets/admin-password}
+  backup_password:
+    file: ${WSR_EVIDENCE_BACKUP_PASSWORD_FILE:-./.secrets/backup-password}
+  runtime_password:
+    file: ${WSR_EVIDENCE_RUNTIME_PASSWORD_FILE:-./.secrets/runtime-password}
+
 volumes:
+  evidence-backups:
   evidence-data:
