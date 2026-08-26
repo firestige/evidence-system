@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 from types import ModuleType
 
@@ -84,12 +85,40 @@ def test_manifest_verifier_requires_wheel_sdist_and_exact_oci_digest(tmp_path: P
         verify_manifest(tmp_path)
 
 
-def test_workflows_keep_app_token_at_the_final_github_publish_boundary() -> None:
+def test_workflows_separate_product_authority_from_publisher_and_scope_release_identity() -> None:
     candidate = (ROOT / ".github/workflows/release-candidate.yml").read_text()
     promote = (ROOT / ".github/workflows/release-promote.yml").read_text()
+    ci = (ROOT / ".github/workflows/ci.yml").read_text()
     dockerfile = (ROOT / "deployment/Dockerfile").read_text()
 
-    assert "WSR_RELEASE_APP_PRIVATE_KEY" not in candidate
+    assert "repository: firestige/workflow-self-recursive" in candidate
+    assert "path: evidence-product" in candidate
+    assert "path: release-publisher" in candidate
+    assert ".evidence.candidate_archive_commit" in candidate
+    assert 'test "$(git -C evidence-product rev-parse HEAD)" = "$PRODUCT_COMMIT"' in candidate
+    assert "evidence.query@0.1.0" in candidate
+    assert 'test "$(jq -r .status' in candidate
+    assert "FROZEN" in candidate
+    assert "RELEASE_TARGET: ${{ steps.authority.outputs.product_commit }}" in candidate
+    assert '--target "$RELEASE_TARGET"' in candidate
+    assert '--build-arg "WSR_RELEASE_REVISION=$RELEASE_TARGET"' in candidate
+    assert "WSR_RELEASE_APP_PRIVATE_KEY" in candidate
+    assert candidate.index("actions/create-github-app-token@") > candidate.index(
+        "Run acceptance gates"
+    )
+    assert candidate.index("actions/create-github-app-token@") < candidate.index(
+        "Create or resume RC with exact local assets"
+    )
+    assert "permission-contents: write" in candidate
+    assert "permission-workflows: write" in candidate
+    assert "repositories: evidence-system" in candidate
+    release_commands = [
+        line
+        for line in candidate.splitlines()
+        if re.search(r"gh release (view|create|download|upload)", line)
+    ]
+    assert release_commands
+    assert all('--repo "$GITHUB_REPOSITORY"' in line for line in release_commands)
     assert "push:" in candidate
     assert "release/request.json" in candidate
     assert "steps.request.outputs.candidate_tag" in candidate
@@ -99,6 +128,12 @@ def test_workflows_keep_app_token_at_the_final_github_publish_boundary() -> None
     assert "org.opencontainers.image.revision=$WSR_RELEASE_REVISION" in dockerfile
     assert "workflow_call:" in candidate
     assert 'test "$GITHUB_REF_NAME" = "release/next"' in candidate
+    assert "workflow_dispatch:" in ci
+    assert "release_candidate:" in ci
+    assert "authority_ref:" in ci
+    assert "authority_manifest:" in ci
+    assert "uses: ./.github/workflows/release-candidate.yml" in ci
+    assert "secrets: inherit" in ci
     assert "actions/create-github-app-token@" in promote
     assert promote.index("actions/create-github-app-token@") > promote.index(
         "Verify qualified assets"
@@ -106,4 +141,12 @@ def test_workflows_keep_app_token_at_the_final_github_publish_boundary() -> None
     assert "GH_TOKEN: ${{ steps.release-app-token.outputs.token }}" in promote
     assert "repositories: evidence-system" in promote
     assert "permission-contents: write" in promote
+    assert "permission-workflows: write" in promote
+    promote_release_commands = [
+        line
+        for line in promote.splitlines()
+        if re.search(r"gh release (view|create|download|upload)", line)
+    ]
+    assert promote_release_commands
+    assert all('--repo "$GITHUB_REPOSITORY"' in line for line in promote_release_commands)
     assert "ghcr.io/firestige/wsr-evidence@$OCI_DIGEST" in promote

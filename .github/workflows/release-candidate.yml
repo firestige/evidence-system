@@ -10,14 +10,28 @@ on:
         description: RC tag, for example 0.1.0-rc.1
         required: true
         type: string
+      authority_ref:
+        description: Superproject ref containing the frozen Contract and unified candidate manifest
+        required: true
+        type: string
+      authority_manifest:
+        description: Superproject-relative immutable unified candidate manifest
+        required: true
+        type: string
   workflow_call:
     inputs:
       candidate_tag:
         required: true
         type: string
+      authority_ref:
+        required: true
+        type: string
+      authority_manifest:
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
   packages: write
 
 concurrency:
@@ -27,117 +41,212 @@ concurrency:
 jobs:
   qualify-and-publish-prerelease:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: Verify release trigger branch
         run: test "$GITHUB_REF_NAME" = "release/next"
+
       - name: Resolve immutable release request
         id: request
         env:
           GH_TOKEN: ${{ github.token }}
           DISPATCH_CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+          DISPATCH_AUTHORITY_REF: ${{ inputs.authority_ref }}
+          DISPATCH_AUTHORITY_MANIFEST: ${{ inputs.authority_manifest }}
         run: |
           if test "$GITHUB_EVENT_NAME" = "push"; then
             gh api "repos/$GITHUB_REPOSITORY/contents/release/request.json?ref=$GITHUB_SHA" \
               --jq .content | base64 --decode > "$RUNNER_TEMP/release-request.json"
             CANDIDATE_TAG="$(jq -er .candidate_tag "$RUNNER_TEMP/release-request.json")"
+            AUTHORITY_REF="$(jq -er .authority_ref "$RUNNER_TEMP/release-request.json")"
+            AUTHORITY_MANIFEST="$(jq -er .authority_manifest "$RUNNER_TEMP/release-request.json")"
           else
             CANDIDATE_TAG="$DISPATCH_CANDIDATE_TAG"
+            AUTHORITY_REF="$DISPATCH_AUTHORITY_REF"
+            AUTHORITY_MANIFEST="$DISPATCH_AUTHORITY_MANIFEST"
           fi
-          test -n "$CANDIDATE_TAG"
+          test -n "$CANDIDATE_TAG" && test -n "$AUTHORITY_REF" && test -n "$AUTHORITY_MANIFEST"
           echo "candidate_tag=$CANDIDATE_TAG" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v6
+          echo "authority_ref=$AUTHORITY_REF" >> "$GITHUB_OUTPUT"
+          echo "authority_manifest=$AUTHORITY_MANIFEST" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout frozen Contract and unified release authority
+        uses: actions/checkout@v6
         with:
+          repository: firestige/workflow-self-recursive
+          ref: ${{ steps.request.outputs.authority_ref }}
           fetch-depth: 0
+          submodules: recursive
+
+      - name: Resolve exact Evidence product and Contract authority
+        id: authority
+        env:
+          AUTHORITY_MANIFEST: ${{ steps.request.outputs.authority_manifest }}
+        run: |
+          case "$AUTHORITY_MANIFEST" in release/candidates/*.json) ;; *) exit 1 ;; esac
+          PRODUCT_COMMIT="$(jq -er .evidence.candidate_archive_commit "$GITHUB_WORKSPACE/$AUTHORITY_MANIFEST")"
+          COMPONENT_MANIFEST="$(jq -er .evidence.manifest_path "$GITHUB_WORKSPACE/$AUTHORITY_MANIFEST")"
+          EXPECTED_MANIFEST_SHA="$(jq -er .evidence.manifest_sha256 "$GITHUB_WORKSPACE/$AUTHORITY_MANIFEST")"
+          test "sha256:$(sha256sum "$GITHUB_WORKSPACE/$COMPONENT_MANIFEST" | cut -d' ' -f1)" = "$EXPECTED_MANIFEST_SHA"
+          RECORD="$GITHUB_WORKSPACE/system-contracts/evidence-query/publication/publication-record-0.1.0.json"
+          test "$(jq -r .contract_revision "$RECORD")" = "evidence.query@0.1.0"
+          test "$(jq -r .status "$RECORD")" = "FROZEN"
+          test "$(jq -r .conformance_claim "$RECORD")" = "VALIDATOR_ONLY"
+          test "$(jq -r .semantic.sha256 "$RECORD")" = "$(sha256sum "$GITHUB_WORKSPACE/docs/contracts/evidence-query/evidence-query.md" | cut -d' ' -f1)"
+          echo "product_commit=$PRODUCT_COMMIT" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout exact Evidence product candidate
+        uses: actions/checkout@v6
+        with:
+          repository: firestige/evidence-system
+          ref: ${{ steps.authority.outputs.product_commit }}
+          fetch-depth: 0
+          path: evidence-product
+
+      - name: Checkout exact publisher tooling revision
+        uses: actions/checkout@v6
+        with:
+          repository: firestige/evidence-system
+          ref: ${{ github.sha }}
+          path: release-publisher
+
+      - name: Verify exact product and publisher checkouts
+        env:
+          PRODUCT_COMMIT: ${{ steps.authority.outputs.product_commit }}
+        run: |
+          test "$(git -C evidence-product rev-parse HEAD)" = "$PRODUCT_COMMIT"
+          test "$(git -C release-publisher rev-parse HEAD)" = "$GITHUB_SHA"
+
       - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
         with:
           version: 0.11.28
           python-version: "3.14"
+
       - uses: docker/setup-buildx-action@v3
+
       - name: Verify candidate coordinate and resolve resumable RC state
         id: candidate
+        working-directory: evidence-product
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_TAG: ${{ steps.request.outputs.candidate_tag }}
+          RELEASE_TARGET: ${{ steps.authority.outputs.product_commit }}
         run: |
           VERSION="$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
           case "$CANDIDATE_TAG" in "$VERSION"-rc.*) ;; *) exit 1 ;; esac
-          if gh release view "$CANDIDATE_TAG" >/dev/null 2>&1; then
-            test "$(gh release view "$CANDIDATE_TAG" --json isPrerelease --jq .isPrerelease)" = true
-            test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$CANDIDATE_TAG" --jq .object.sha)" = "$GITHUB_SHA"
+          if gh release view "$CANDIDATE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            test "$(gh release view "$CANDIDATE_TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq .isPrerelease)" = true
+            test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$CANDIDATE_TAG" --jq .object.sha)" = "$RELEASE_TARGET"
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
-            if git ls-remote --exit-code --tags origin "refs/tags/$CANDIDATE_TAG" >/dev/null 2>&1; then
-              test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$CANDIDATE_TAG" --jq .object.sha)" = "$GITHUB_SHA"
+            if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$CANDIDATE_TAG" >/dev/null 2>&1; then
+              test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$CANDIDATE_TAG" --jq .object.sha)" = "$RELEASE_TARGET"
             fi
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
+
       - name: Run acceptance gates
+        working-directory: evidence-product
         run: make check && make integration && make deployment
+
       - name: Resolve or publish immutable candidate OCI image
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_TAG: ${{ steps.request.outputs.candidate_tag }}
+          RELEASE_TARGET: ${{ steps.authority.outputs.product_commit }}
         run: |
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           IMAGE="ghcr.io/firestige/wsr-evidence:$CANDIDATE_TAG"
           if docker buildx imagetools inspect "$IMAGE" --format '{{json .Image}}' > "$RUNNER_TEMP/image-config.json" 2>/dev/null; then
             test "$(jq -r '.config.Labels["org.opencontainers.image.source"] // empty' "$RUNNER_TEMP/image-config.json")" = "https://github.com/firestige/evidence-system"
-            test "$(jq -r '.config.Labels["org.opencontainers.image.revision"] // empty' "$RUNNER_TEMP/image-config.json")" = "$GITHUB_SHA"
+            test "$(jq -r '.config.Labels["org.opencontainers.image.revision"] // empty' "$RUNNER_TEMP/image-config.json")" = "$RELEASE_TARGET"
             docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest}}' \
               | jq -er .digest > "$RUNNER_TEMP/oci-digest"
           else
             docker buildx build --push \
               --tag "$IMAGE" \
-              --build-arg "WSR_RELEASE_REVISION=$GITHUB_SHA" \
+              --build-arg "WSR_RELEASE_REVISION=$RELEASE_TARGET" \
               --metadata-file "$RUNNER_TEMP/image-metadata.json" \
-              --file deployment/Dockerfile .
+              --file "$GITHUB_WORKSPACE/release-publisher/deployment/Dockerfile" \
+              "$GITHUB_WORKSPACE/evidence-product"
             jq -er '.["containerimage.digest"]' "$RUNNER_TEMP/image-metadata.json" > "$RUNNER_TEMP/oci-digest"
           fi
-      - name: Build immutable Python assets and manifest
+
+      - name: Build and verify exact immutable Python assets
+        working-directory: evidence-product
+        env:
+          AUTHORITY_MANIFEST: ${{ steps.request.outputs.authority_manifest }}
         run: |
           uv run python -m release.cli.release build \
             "$RUNNER_TEMP/local-release" "$(cat "$RUNNER_TEMP/oci-digest")"
+          for NAME in wsr_evidence-0.1.0-py3-none-any.whl wsr_evidence-0.1.0.tar.gz; do
+            EXPECTED="$(jq -er --arg name "$NAME" '.evidence.assets[] | select(.name == $name) | .sha256' "$GITHUB_WORKSPACE/$AUTHORITY_MANIFEST")"
+            ACTUAL="sha256:$(sha256sum "$RUNNER_TEMP/local-release/$NAME" | cut -d' ' -f1)"
+            test "$ACTUAL" = "$EXPECTED"
+          done
+
+      - name: Mint short-lived release App token after candidate qualification
+        id: release-app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.WSR_RELEASE_APP_ID }}
+          private-key: ${{ secrets.WSR_RELEASE_APP_PRIVATE_KEY }}
+          owner: firestige
+          repositories: evidence-system
+          permission-contents: write
+          permission-workflows: write
+
       - name: Create or resume RC with exact local assets
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
           CANDIDATE_TAG: ${{ steps.request.outputs.candidate_tag }}
           RC_EXISTS: ${{ steps.candidate.outputs.exists }}
+          RELEASE_TARGET: ${{ steps.authority.outputs.product_commit }}
         run: |
           if test "$RC_EXISTS" != true; then
-            gh release create "$CANDIDATE_TAG" --prerelease --target "$GITHUB_SHA"
+            gh release create "$CANDIDATE_TAG" --repo "$GITHUB_REPOSITORY" --prerelease --target "$RELEASE_TARGET"
           fi
           mkdir "$RUNNER_TEMP/existing-assets"
           for FILE in "$RUNNER_TEMP/local-release/"*; do
             NAME="$(basename "$FILE")"
-            if gh release view "$CANDIDATE_TAG" --json assets --jq '.assets[].name' | grep -Fxq "$NAME"; then
-              gh release download "$CANDIDATE_TAG" --pattern "$NAME" --dir "$RUNNER_TEMP/existing-assets"
+            if gh release view "$CANDIDATE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fxq "$NAME"; then
+              gh release download "$CANDIDATE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$NAME" --dir "$RUNNER_TEMP/existing-assets"
               cmp "$FILE" "$RUNNER_TEMP/existing-assets/$NAME"
             else
-              gh release upload "$CANDIDATE_TAG" "$FILE"
+              gh release upload "$CANDIDATE_TAG" --repo "$GITHUB_REPOSITORY" "$FILE"
             fi
           done
-      - name: Redownload and verify exact RC assets
+
+      - name: Redownload and verify exact RC assets and OCI digest
+        working-directory: evidence-product
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
           CANDIDATE_TAG: ${{ steps.request.outputs.candidate_tag }}
         run: |
           mkdir "$RUNNER_TEMP/remote-release"
-          gh release download "$CANDIDATE_TAG" --dir "$RUNNER_TEMP/remote-release"
+          gh release download "$CANDIDATE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/remote-release"
           uv run python -m release.cli.release verify "$RUNNER_TEMP/remote-release"
           cmp "$RUNNER_TEMP/local-release/release-metadata.json" "$RUNNER_TEMP/remote-release/release-metadata.json"
           OCI_DIGEST="$(jq -r .ociDigest "$RUNNER_TEMP/remote-release/release-metadata.json")"
+          test "$OCI_DIGEST" = "$(cat "$RUNNER_TEMP/oci-digest")"
           docker pull "ghcr.io/firestige/wsr-evidence@$OCI_DIGEST"
+
+      - name: Run deployment and backup-restore against remote-qualified state
+        working-directory: evidence-product
+        run: make deployment
+
       - name: Attach qualification evidence
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
           CANDIDATE_TAG: ${{ steps.request.outputs.candidate_tag }}
+          RELEASE_TARGET: ${{ steps.authority.outputs.product_commit }}
         run: |
-          export CANDIDATE_TAG
-          uv run python -c 'import hashlib,json,os,pathlib; p=pathlib.Path(os.environ["RUNNER_TEMP"]); m=(p/"remote-release/release-metadata.json").read_bytes(); d=json.loads(m); q={"schemaVersion":"wsr.release-qualification@1.0.0","candidateTag":os.environ["CANDIDATE_TAG"],"commit":os.environ["GITHUB_SHA"],"artifactMetadataSha256":"sha256:"+hashlib.sha256(m).hexdigest(),"ociDigest":d["ociDigest"],"localAcceptance":{"status":"PASS"},"remoteQualification":{"status":"PASS"}}; (p/"release-qualification.json").write_text(json.dumps(q,indent=2)+"\n")'
-          if gh release view "$CANDIDATE_TAG" --json assets --jq '.assets[].name' | grep -Fxq release-qualification.json; then
+          export CANDIDATE_TAG RELEASE_TARGET
+          uv run --directory evidence-product python -c 'import hashlib,json,os,pathlib; p=pathlib.Path(os.environ["RUNNER_TEMP"]); m=(p/"remote-release/release-metadata.json").read_bytes(); d=json.loads(m); q={"schemaVersion":"wsr.release-qualification@1.0.0","candidateTag":os.environ["CANDIDATE_TAG"],"commit":os.environ["RELEASE_TARGET"],"publisherRevision":os.environ["GITHUB_SHA"],"contractRevision":"evidence.query@0.1.0","contractStatus":"FROZEN","artifactMetadataSha256":"sha256:"+hashlib.sha256(m).hexdigest(),"ociDigest":d["ociDigest"],"localAcceptance":{"status":"PASS"},"remoteQualification":{"status":"PASS"}}; (p/"release-qualification.json").write_text(json.dumps(q,indent=2)+"\n")'
+          if gh release view "$CANDIDATE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fxq release-qualification.json; then
             mkdir "$RUNNER_TEMP/existing-qualification"
-            gh release download "$CANDIDATE_TAG" --pattern release-qualification.json --dir "$RUNNER_TEMP/existing-qualification"
+            gh release download "$CANDIDATE_TAG" --repo "$GITHUB_REPOSITORY" --pattern release-qualification.json --dir "$RUNNER_TEMP/existing-qualification"
             cmp "$RUNNER_TEMP/release-qualification.json" "$RUNNER_TEMP/existing-qualification/release-qualification.json"
           else
-            gh release upload "$CANDIDATE_TAG" "$RUNNER_TEMP/release-qualification.json"
+            gh release upload "$CANDIDATE_TAG" --repo "$GITHUB_REPOSITORY" "$RUNNER_TEMP/release-qualification.json"
           fi
