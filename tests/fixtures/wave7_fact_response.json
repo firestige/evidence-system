@@ -1,0 +1,46 @@
+{
+  "contract": {"name": "evidence.query", "revision": "0.1.0"},
+  "observation_profile": "1.0.0",
+  "read_model_revision": "1.0.0",
+  "snapshot": "snapshot-1",
+  "items": [
+    {
+      "id": "fact:event:[\"event\",\"review-event-1\"]:EVENT_CONTRIBUTION:[\"review.summary\",\"review-event-1\"]",
+      "kind": "EVENT_CONTRIBUTION",
+      "source": {"kind": "EVENT", "event_id": "review-event-1"},
+      "recorded_at": "2026-08-26T01:02:03.000000Z",
+      "provenance": {
+        "accepted_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "profile_version": "1.0.0",
+        "family_schema": "system-design@1",
+        "owner_key": ["review.summary", "review-event-1"]
+      },
+      "compatibility": {
+        "family_schema": "system-design@1",
+        "event_name": "review.summary",
+        "completeness": "FINAL",
+        "dimensions": [
+          {"field": "C13", "value": "FRESH_READER"},
+          {"field": "C14", "value": "SYSTEM_DESIGN"}
+        ]
+      },
+      "truth": {
+        "completeness": "FINAL",
+        "availability": "AVAILABLE",
+        "expiry": "ACTIVE",
+        "expires_at": "2027-08-26T01:02:03.000000Z"
+      },
+      "fields": [
+        {"field": "C09", "value": "review-event-1"},
+        {"field": "C11", "value": "FINAL"},
+        {"field": "C12", "value": "review-1"},
+        {"field": "C13", "value": "FRESH_READER"},
+        {"field": "C14", "value": "SYSTEM_DESIGN"},
+        {"field": "C17", "value": 0},
+        {"field": "C49", "value": "system-design@1"}
+      ],
+      "relationships": []
+    }
+  ],
+  "next_cursor": null
+}
