@@ -18,6 +18,7 @@ from wsr_evidence.storage.read_model import (
     Completeness,
     ExpiryBatch,
     ExpiryOwner,
+    ExpiryRecord,
     ExpiryResult,
     ExpiryState,
     QueryExpiryReadModel,
@@ -120,8 +121,8 @@ def test_retention_policy_rejects_out_of_range_values(overrides: dict[str, objec
 
 def test_expiry_batch_identity_is_canonical_and_rejects_duplicates() -> None:
     cutoff = datetime(2026, 8, 26, tzinfo=UTC)
-    trace_a = ExpiryOwner(resource_kind="NODE", owner_key=("trace-a",))
-    trace_b = ExpiryOwner(resource_kind="LINK", owner_key=("trace-b",))
+    trace_a = ExpiryOwner(resource_kind="NODE", owner_key=("1" * 32, "a" * 16))
+    trace_b = ExpiryOwner(resource_kind="LINK", owner_key=("1" * 32, "a" * 16, "2" * 32, "b" * 16))
     first = ExpiryBatch.create(
         resource_class=ResourceClass.TRACE_DETAIL,
         policy_revision="1.0.0",
@@ -148,6 +149,64 @@ def test_expiry_batch_identity_is_canonical_and_rejects_duplicates() -> None:
             cutoff=cutoff,
             ttl_seconds=2_592_000,
             members=(trace_a, trace_a),
+        )
+
+
+@pytest.mark.parametrize(
+    "owner",
+    [
+        ExpiryOwner(resource_kind="RAW_DEBUG", owner_key=("unknown", "id")),
+        ExpiryOwner(resource_kind="NODE", owner_key=("1" * 32,)),
+        ExpiryOwner(resource_kind="PARENT_EDGE", owner_key=("1" * 32, "a" * 16)),
+        ExpiryOwner(resource_kind="LINK", owner_key=("1" * 32, "a" * 16, "2" * 32)),
+        ExpiryOwner(resource_kind="DELIVERY_ROOT_BINDING", owner_key=("not-a-trace",)),
+    ],
+)
+def test_expiry_batch_rejects_owner_keys_outside_the_closed_kind_shape(
+    owner: ExpiryOwner,
+) -> None:
+    with pytest.raises(ValueError):
+        ExpiryBatch.create(
+            resource_class=(
+                ResourceClass.RAW_DEBUG
+                if owner.resource_kind == "RAW_DEBUG"
+                else ResourceClass.TRACE_DETAIL
+                if owner.resource_kind in {"NODE", "PARENT_EDGE", "LINK"}
+                else ResourceClass.FACTUAL_PROJECTION
+            ),
+            policy_revision="1.0.0",
+            cutoff=datetime(2026, 8, 26, tzinfo=UTC),
+            ttl_seconds=0,
+            members=(owner,),
+        )
+
+
+def test_expiry_record_rejects_noncanonical_compatibility_pairs() -> None:
+    common = {
+        "resource_class": ResourceClass.FACTUAL_PROJECTION,
+        "owner_key": ("review.summary", "event-1"),
+        "source_identity": ("event", '["event","event-1"]'),
+        "resource_kind": "EVENT_CONTRIBUTION",
+        "recorded_at": datetime(2026, 8, 26, tzinfo=UTC),
+        "policy_revision": "1.0.0",
+        "expires_at": datetime(2027, 8, 26, tzinfo=UTC),
+        "expired_at": datetime(2027, 8, 27, tzinfo=UTC),
+    }
+
+    with pytest.raises(ValueError):
+        ExpiryRecord(
+            **common,
+            compatibility=(("event_name", "review.summary"), ("family_schema", None)),
+        )
+    with pytest.raises(ValueError):
+        ExpiryRecord(
+            **common,
+            compatibility=(
+                ("family_schema", None),
+                ("event_name", "review.summary"),
+                ("completeness", "FINAL"),
+                ("unknown", "value"),
+            ),
         )
 
 
@@ -184,14 +243,14 @@ def test_expiry_batch_has_a_cross_language_canonical_digest_vector() -> None:
         cutoff=datetime(2026, 8, 26, 1, 2, 3, tzinfo=UTC),
         ttl_seconds=31_536_000,
         members=(
-            ExpiryOwner(resource_kind="ROLE_LINEAGE", owner_key=("家", True, 7, 1.5, None)),
+            ExpiryOwner(resource_kind="ROLE_LINEAGE", owner_key=("家", "角色")),
             ExpiryOwner(resource_kind="FINDING_ASSERTION", owner_key=("same", "key")),
         ),
     )
 
     assert batch.ttl_seconds == 31_536_000
     assert (
-        batch.batch_identity == "21cb8ff7585fea778af051160ce1b02b4672127b4d1d9b75e83e783694f02657"
+        batch.batch_identity == "cbae1a7afcfa501cc6ee709821b6e6ecf354fe8b540d9a8109ab4c6e4f32a4ad"
     )
 
 

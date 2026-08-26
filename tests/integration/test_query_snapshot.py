@@ -132,7 +132,9 @@ async def test_trace_sort_is_node_parent_link_and_delivery_traversal_is_bounded(
     now = datetime(2026, 8, 26, 2, 0, tzinfo=UTC)
     try:
         first_trace = "0" * 31 + "1"
-        admitted = await admission.admit(span_record(first_trace))
+        first_record = span_record(first_trace)
+        first_record["span_links"].append(dict(first_record["span_links"][0]))
+        admitted = await admission.admit(first_record)
         assert admitted.disposition is Disposition.ACCEPTED
         page = await query_storage.acquire_snapshot(
             query="TRACES", filters=(("trace_id", first_trace),), limit=10, clock_now=now
@@ -142,6 +144,7 @@ async def test_trace_sort_is_node_parent_link_and_delivery_traversal_is_bounded(
             "trace_parent_edge",
             "trace_link",
         ]
+        assert sum(effect.kind == "trace_link" for effect in page.resources) == 1
 
         await query_storage.close()
         query_storage = PostgresQueryReadModel.from_storage(storage)

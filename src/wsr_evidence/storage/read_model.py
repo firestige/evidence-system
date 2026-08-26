@@ -198,6 +198,119 @@ def _validate_expiry_kind(resource_class: ResourceClass, resource_kind: str) -> 
         raise ValueError("resource kind is not valid for its expiry class")
 
 
+def _is_hex(value: Scalar, length: int) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == length
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _all_strings(values: OwnerKey) -> bool:
+    return all(isinstance(value, str) and bool(value) for value in values)
+
+
+def _validate_expiry_owner(resource_class: ResourceClass, owner: ExpiryOwner) -> None:
+    _validate_expiry_kind(resource_class, owner.resource_kind)
+    key = owner.owner_key
+    valid = False
+    if resource_class is ResourceClass.RAW_DEBUG:
+        valid = (
+            len(key) == 2 and key[0] == "event" and isinstance(key[1], str) and bool(key[1])
+        ) or (len(key) == 3 and key[0] == "span" and _is_hex(key[1], 32) and _is_hex(key[2], 16))
+    elif resource_class is ResourceClass.TRACE_DETAIL:
+        valid = {
+            "NODE": len(key) == 2 and _is_hex(key[0], 32) and _is_hex(key[1], 16),
+            "PARENT_EDGE": (
+                len(key) == 3
+                and _is_hex(key[0], 32)
+                and _is_hex(key[1], 16)
+                and _is_hex(key[2], 16)
+            ),
+            "LINK": (
+                len(key) == 4
+                and _is_hex(key[0], 32)
+                and _is_hex(key[1], 16)
+                and _is_hex(key[2], 32)
+                and _is_hex(key[3], 16)
+            ),
+        }.get(owner.resource_kind, False)
+    elif resource_class is ResourceClass.FACTUAL_PROJECTION:
+        fixed_string_arity = {
+            "EVENT_CONTRIBUTION": 2,
+            "FINDING_ASSERTION": 2,
+            "FINDING_STATUS": 3,
+            "ROLE_LINEAGE": 2,
+        }
+        if owner.resource_kind in fixed_string_arity:
+            valid = len(key) == fixed_string_arity[owner.resource_kind] and _all_strings(key)
+        elif owner.resource_kind == "FINDING_TARGET":
+            valid = (
+                len(key) == 5
+                and _all_strings(key[:4])
+                and (key[4] is None or isinstance(key[4], str) and bool(key[4]))
+            )
+        elif owner.resource_kind in {"FINDING_FIX", "FINDING_RECHECK"}:
+            valid = (
+                len(key) == 6
+                and _all_strings(key[:4])
+                and (key[4] is None or isinstance(key[4], str) and bool(key[4]))
+                and isinstance(key[5], str)
+                and bool(key[5])
+            )
+        elif owner.resource_kind == "DELIVERY_ROOT_BINDING":
+            valid = len(key) == 1 and _is_hex(key[0], 32)
+        elif owner.resource_kind == "MODEL_ATTRIBUTION":
+            valid = (
+                len(key) == 6
+                and _all_strings(key[:4])
+                and _is_hex(key[4], 32)
+                and _is_hex(key[5], 16)
+            )
+    if not valid:
+        raise ValueError("owner key does not match its closed resource kind shape")
+
+
+def _validate_compatibility(record: ExpiryRecord) -> None:
+    pairs = record.compatibility
+    if record.resource_class in {ResourceClass.RAW_DEBUG, ResourceClass.TRACE_DETAIL}:
+        if pairs:
+            raise ValueError("Raw and Trace expiry compatibility must be empty")
+        return
+    if not 3 <= len(pairs) <= 7 or tuple(key for key, _ in pairs[:3]) != (
+        "family_schema",
+        "event_name",
+        "completeness",
+    ):
+        raise ValueError("factual expiry compatibility requires its three base pairs")
+    keys = tuple(key for key, _ in pairs)
+    if len(set(keys)) != len(keys):
+        raise ValueError("expiry compatibility pair keys must be unique")
+    event_name = pairs[1][1]
+    dimension_orders = {
+        "usage": ("C42", "C43", "C44", "C45"),
+        "implementation.summary": ("I05", "I08", "I09", "I10"),
+        "test.summary": ("C28", "C29"),
+        "review.summary": ("C13", "C14"),
+    }
+    allowed_suffix: tuple[str, ...] = ()
+    if record.resource_kind == "EVENT_CONTRIBUTION" and isinstance(event_name, str):
+        allowed_suffix = dimension_orders.get(event_name, ())
+    elif record.resource_kind == "FINDING_ASSERTION":
+        allowed_suffix = ("C13", "C14")
+    elif record.resource_kind == "MODEL_ATTRIBUTION":
+        allowed_suffix = ("gen_ai.provider.name", "C57", "C30", "C06")
+    elif record.resource_kind == "DELIVERY_ROOT_BINDING":
+        allowed_suffix = ("delivery_id",)
+    suffix = keys[3:]
+    positions = [allowed_suffix.index(key) for key in suffix if key in allowed_suffix]
+    if len(positions) != len(suffix) or positions != sorted(positions):
+        raise ValueError("expiry compatibility dimensions are unknown or out of order")
+    for key, value in pairs:
+        if not isinstance(key, str) or not key or not _is_scalar(value):
+            raise ValueError("expiry compatibility pairs must contain bounded scalars")
+
+
 @dataclass(frozen=True, slots=True)
 class ExpiryRecord:
     resource_class: ResourceClass
@@ -212,12 +325,16 @@ class ExpiryRecord:
 
     def __post_init__(self) -> None:
         _validate_owner_key(self.owner_key)
-        _validate_expiry_kind(self.resource_class, self.resource_kind)
+        _validate_expiry_owner(
+            self.resource_class,
+            ExpiryOwner(resource_kind=self.resource_kind, owner_key=self.owner_key),
+        )
         _require_aware(self.recorded_at, "recorded_at")
         _require_aware(self.expires_at, "expires_at")
         _require_aware(self.expired_at, "expired_at")
         if not self.resource_kind or not self.policy_revision:
             raise ValueError("expiry marker coordinates must be nonempty")
+        _validate_compatibility(self)
 
 
 def _require_aware(value: datetime | None, name: str, *, optional: bool = False) -> None:
@@ -233,6 +350,8 @@ def _validate_owner_key(owner_key: OwnerKey) -> None:
     if not 1 <= len(owner_key) <= 16:
         raise ValueError("owner key must contain 1 through 16 scalars")
     for value in owner_key:
+        if not _is_scalar(value):
+            raise ValueError("owner key values must be scalars")
         if isinstance(value, str) and not 1 <= len(value.encode("utf-8")) <= 256:
             raise ValueError("owner key strings must contain 1 through 256 UTF-8 bytes")
         if (
@@ -243,6 +362,14 @@ def _validate_owner_key(owner_key: OwnerKey) -> None:
             raise ValueError("owner key integers must be interoperable")
         if isinstance(value, float) and not math.isfinite(value):
             raise ValueError("owner key numbers must be finite")
+
+
+def _is_scalar(value: object) -> bool:
+    if value is None or isinstance(value, (str, bool)):
+        return True
+    if isinstance(value, int):
+        return -9_007_199_254_740_991 <= value <= 9_007_199_254_740_991
+    return isinstance(value, float) and math.isfinite(value)
 
 
 def _canonical_key(owner_key: OwnerKey) -> str:
@@ -339,7 +466,7 @@ class ExpiryBatch:
         if len(members) > 1000:
             raise ValueError("expiry batch cannot exceed 1000 members")
         for member in members:
-            _validate_expiry_kind(resource_class, member.resource_kind)
+            _validate_expiry_owner(resource_class, member)
         canonical = sorted((_canonical_member(member), member) for member in members)
         if any(left[0] == right[0] for left, right in zip(canonical, canonical[1:], strict=False)):
             raise ValueError("expiry batch members must be unique")

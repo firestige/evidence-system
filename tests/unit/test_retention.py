@@ -42,7 +42,11 @@ class FakeMaintenance:
                         ResourceClass.TRACE_DETAIL: "NODE",
                         ResourceClass.FACTUAL_PROJECTION: "EVENT_CONTRIBUTION",
                     }[resource_class],
-                    owner_key=(resource_class.value,),
+                    owner_key={
+                        ResourceClass.RAW_DEBUG: ("event", "event-1"),
+                        ResourceClass.TRACE_DETAIL: ("1" * 32, "a" * 16),
+                        ResourceClass.FACTUAL_PROJECTION: ("review.summary", "event-1"),
+                    }[resource_class],
                 ),
             ),
         )
