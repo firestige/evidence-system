@@ -1,0 +1,61 @@
+{
+  "schema_version": "wsr.evidence-immutable-candidate@1.0.0",
+  "status": "IMMUTABLE_RELEASE_CANDIDATE",
+  "created_at": "2026-08-26",
+  "evidence": {
+    "version": "0.1.0",
+    "payload_commit": "cdc540ac53991a2ba243598e2dc2ec9596c695e4",
+    "migration_revision": "20260826_0003"
+  },
+  "pinned_inputs": {
+    "evidence_base_commit": "f9bfd3776057645e6cbebb7ac685a82d48ddbdb4",
+    "system_contracts_commit": "6f77510234961149922165666ed0be2d2f82b84b",
+    "superproject_commit": "65f6e4deaea37e43a5d6242bd0df1c1e57cb9abf",
+    "wave6_manifest_sha256": "e605720c5b225fa9228e2a4b1a8001f3235482ed83dc214e4c766e5caa6e1706"
+  },
+  "contract": {
+    "coordinate": "evidence.query@0.1.0",
+    "status": "REVIEW_CANDIDATE",
+    "published": false,
+    "machine_content_revision": "sha256:6d37245fbac11dde2967a7775efb541e00fb4c8b00c80011b91aef007346cfa1",
+    "publication_candidate_sha256": "97c3e158c18cd7e92da949d82a17b71c5e4bf08d081fef6e5f4b6dcb9c00c6a7"
+  },
+  "deployment": {
+    "target": "local-compose-loopback-only",
+    "api_binding": "127.0.0.1:4318",
+    "postgres_host_port": null,
+    "presentation_services": [],
+    "compose_sha256": "877a2a0ffdb2fa5c6eed2367d31faf6ecd14d84a7177f76208a462138ba34cc4"
+  },
+  "assets": [
+    {
+      "name": "wsr_evidence-0.1.0-py3-none-any.whl",
+      "bytes": 50071,
+      "sha256": "sha256:e4e409561a1eb778bbdf7cefc406cf3242fc5972ef00aeffd3e558d6aeeb08ef"
+    },
+    {
+      "name": "wsr_evidence-0.1.0.tar.gz",
+      "bytes": 38032,
+      "sha256": "sha256:6660c0a2a05dbc92060764e3b03167adb9eef472cd98588e22af04ce0bc5ccea"
+    },
+    {
+      "name": "ghcr.io/firestige/wsr-evidence:0.1.0-rc",
+      "bytes": null,
+      "sha256": "sha256:51f890d1bc6cf75425d3696c88dbabbe5ab2413468eeaa8bb14a10cd23cf8d79"
+    }
+  ],
+  "gates": {
+    "python_3_13_unit": "PASS_116",
+    "python_3_14_unit": "PASS_116",
+    "lint_type_build": "PASS",
+    "postgresql_18_4_migrations_and_integration": "PASS_12",
+    "compose_backup_restore": "PASS",
+    "contract_candidate": "PASS_18_TESTS_17_FIXTURES"
+  },
+  "non_claims": [
+    "NO_TAG_OR_RELEASE_CREATED",
+    "CONTRACT_NOT_FROZEN_OR_PUBLISHED",
+    "NO_IMPLEMENTATION_CONFORMANCE_CLAIM",
+    "OCI_VALUE_IS_LOCAL_CANDIDATE_IMAGE_ID_UNTIL_WAVE11_PUBLICATION"
+  ]
+}

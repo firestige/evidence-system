@@ -13,6 +13,7 @@ class RuntimeSettings:
     host: str = "127.0.0.1"
     port: int = 4318
     bind_scope: Literal["loopback", "container"] = "loopback"
+    database_url: str | None = None
 
     def __post_init__(self) -> None:
         if self.bind_scope not in {"loopback", "container"}:
@@ -37,4 +38,5 @@ class RuntimeSettings:
             host=os.environ.get("WSR_EVIDENCE_HOST", "127.0.0.1"),
             port=int(os.environ.get("WSR_EVIDENCE_PORT", "4318")),
             bind_scope=cast(Literal["loopback", "container"], bind_scope),
+            database_url=os.environ.get("WSR_EVIDENCE_DATABASE_URL"),
         )

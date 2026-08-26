@@ -2,7 +2,7 @@ PYTHON_VERSION ?= 3.14
 UV_RUN := uv run --python $(PYTHON_VERSION)
 COMPOSE := docker compose -f deployment/compose.yaml
 
-.PHONY: sync format lint unit integration migration deployment build check
+.PHONY: sync format lint unit integration migration deployment deployment-up deployment-down backup restore build check
 
 sync:
 	uv sync --locked --python $(PYTHON_VERSION)
@@ -26,6 +26,18 @@ migration:
 
 deployment:
 	./scripts/deployment-smoke.sh
+
+deployment-up:
+	./scripts/local-deployment.sh up
+
+deployment-down:
+	./scripts/local-deployment.sh down
+
+backup:
+	./scripts/local-deployment.sh backup "$(BACKUP_FILE)"
+
+restore:
+	./scripts/local-deployment.sh restore "$(BACKUP_FILE)" "$(RESTORE_DATABASE)"
 
 build:
 	uv build --python $(PYTHON_VERSION)

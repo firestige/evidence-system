@@ -33,6 +33,8 @@ make check        # non-container quality/build gate
 
 The supported Compose deployment publishes the API only on `127.0.0.1:4318`; PostgreSQL has no host-published port. Runtime startup never applies migrations implicitly.
 
+Local startup, separated database roles, file-backed secrets, read-only backup, non-overwriting restore, and the exact negative network checks are documented in [Evidence local operations](docs/operations.md).
+
 ## Get the source
 
 This repository is normally consumed as a submodule of [workflow-self-recursive](https://github.com/firestige/workflow-self-recursive):

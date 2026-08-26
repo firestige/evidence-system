@@ -1,0 +1,81 @@
+name: Promote qualified Evidence candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_tag:
+        required: true
+        type: string
+      final_tag:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: evidence-release-promotion
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve candidate commit
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+        run: |
+          test "$(gh release view "$CANDIDATE_TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq .isPrerelease)" = true
+          echo "sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$CANDIDATE_TAG" --jq .object.sha)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.candidate.outputs.sha }}
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          version: 0.11.28
+          python-version: "3.14"
+      - name: Verify qualified assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+          FINAL_TAG: ${{ inputs.final_tag }}
+          EXPECTED_COMMIT: ${{ steps.candidate.outputs.sha }}
+        run: |
+          mkdir "$RUNNER_TEMP/qualified-release"
+          gh release download "$CANDIDATE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/qualified-release"
+          uv run python -m release.cli.release verify "$RUNNER_TEMP/qualified-release"
+          VERSION="$(uv run python -m release.cli.release verify "$RUNNER_TEMP/qualified-release" | jq -r .version)"
+          test "$FINAL_TAG" = "$VERSION"
+          uv run python -c 'import hashlib,json,os,pathlib; p=pathlib.Path(os.environ["RUNNER_TEMP"])/"qualified-release"; q=json.loads((p/"release-qualification.json").read_text()); m=(p/"release-metadata.json").read_bytes(); assert q["schemaVersion"]=="wsr.release-qualification@1.0.0" and q["candidateTag"]==os.environ["CANDIDATE_TAG"] and q["commit"]==os.environ["EXPECTED_COMMIT"] and q["artifactMetadataSha256"]=="sha256:"+hashlib.sha256(m).hexdigest() and q["localAcceptance"]["status"]==q["remoteQualification"]["status"]=="PASS"'
+          ! gh release view "$FINAL_TAG" --repo "$GITHUB_REPOSITORY"
+          ! git ls-remote --exit-code --tags origin "refs/tags/$FINAL_TAG"
+      - name: Requalify exact OCI digest and attach stable OCI tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FINAL_TAG: ${{ inputs.final_tag }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          OCI_DIGEST="$(jq -r .ociDigest "$RUNNER_TEMP/qualified-release/release-metadata.json")"
+          docker pull "ghcr.io/firestige/wsr-evidence@$OCI_DIGEST"
+          docker buildx imagetools create \
+            --tag "ghcr.io/firestige/wsr-evidence:$FINAL_TAG" \
+            "ghcr.io/firestige/wsr-evidence@$OCI_DIGEST"
+      - name: Mint short-lived release App token for final publish only
+        id: release-app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.WSR_RELEASE_APP_ID }}
+          private-key: ${{ secrets.WSR_RELEASE_APP_PRIVATE_KEY }}
+          owner: firestige
+          repositories: evidence-system
+          permission-contents: write
+          permission-workflows: write
+      - name: Create stable tag and Release as the last operation
+        env:
+          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
+          FINAL_TAG: ${{ inputs.final_tag }}
+        run: gh release create "$FINAL_TAG" --repo "$GITHUB_REPOSITORY" "$RUNNER_TEMP/qualified-release/"* --target "${{ steps.candidate.outputs.sha }}"

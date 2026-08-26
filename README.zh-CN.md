@@ -33,6 +33,8 @@ make check        # 非容器质量/构建门
 
 受支持的 Compose 部署只在 `127.0.0.1:4318` 发布 API；PostgreSQL 不向宿主机发布端口。运行时启动不会隐式执行 migration。
 
+本地启动、数据库角色分离、文件型 secret、只读备份、拒绝覆盖的恢复流程与精确网络负向检查见 [Evidence local operations](docs/operations.md)。
+
 ## 获取源码
 
 本仓库通常作为 [workflow-self-recursive](https://github.com/firestige/workflow-self-recursive) 的 submodule 使用：

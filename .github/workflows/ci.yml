@@ -4,12 +4,45 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      release_candidate:
+        description: Run the release-candidate workflow from release/next
+        required: true
+        default: false
+        type: boolean
+      candidate_tag:
+        description: RC tag, for example 0.1.0-rc.1
+        required: false
+        type: string
+      authority_ref:
+        description: Superproject ref containing the frozen Contract and unified candidate manifest
+        required: false
+        type: string
+      authority_manifest:
+        description: Superproject-relative immutable unified candidate manifest
+        required: false
+        default: release/candidates/iter4-wave12.json
+        type: string
 
 permissions:
   contents: read
 
 jobs:
+  release-candidate:
+    if: github.event_name == 'workflow_dispatch' && inputs.release_candidate
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/release-candidate.yml
+    with:
+      candidate_tag: ${{ inputs.candidate_tag }}
+      authority_ref: ${{ inputs.authority_ref }}
+      authority_manifest: ${{ inputs.authority_manifest }}
+    secrets: inherit
+
   python-compatibility:
+    if: github.event_name != 'workflow_dispatch' || !inputs.release_candidate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -25,6 +58,7 @@ jobs:
       - run: uv run pytest -q tests/unit
 
   quality-and-build:
+    if: github.event_name != 'workflow_dispatch' || !inputs.release_candidate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -39,6 +73,7 @@ jobs:
       - run: uv build
 
   postgresql-integration:
+    if: github.event_name != 'workflow_dispatch' || !inputs.release_candidate
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -67,6 +102,7 @@ jobs:
       - run: uv run pytest -q -m integration tests/integration
 
   container:
+    if: github.event_name != 'workflow_dispatch' || !inputs.release_candidate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
