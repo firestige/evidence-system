@@ -53,37 +53,69 @@ jobs:
           version: 0.11.28
           python-version: "3.14"
       - uses: docker/setup-buildx-action@v3
-      - name: Verify candidate coordinate and collisions
+      - name: Verify candidate coordinate and resolve resumable RC state
+        id: candidate
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_TAG: ${{ steps.request.outputs.candidate_tag }}
         run: |
           VERSION="$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
           case "$CANDIDATE_TAG" in "$VERSION"-rc.*) ;; *) exit 1 ;; esac
-          ! gh release view "$CANDIDATE_TAG"
-          ! git ls-remote --exit-code --tags origin "refs/tags/$CANDIDATE_TAG"
+          if gh release view "$CANDIDATE_TAG" >/dev/null 2>&1; then
+            test "$(gh release view "$CANDIDATE_TAG" --json isPrerelease --jq .isPrerelease)" = true
+            test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$CANDIDATE_TAG" --jq .object.sha)" = "$GITHUB_SHA"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            if git ls-remote --exit-code --tags origin "refs/tags/$CANDIDATE_TAG" >/dev/null 2>&1; then
+              test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$CANDIDATE_TAG" --jq .object.sha)" = "$GITHUB_SHA"
+            fi
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Run acceptance gates
         run: make check && make integration && make deployment
-      - name: Build and publish candidate OCI image
+      - name: Resolve or publish immutable candidate OCI image
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_TAG: ${{ steps.request.outputs.candidate_tag }}
         run: |
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker buildx build --push \
-            --tag "ghcr.io/firestige/wsr-evidence:$CANDIDATE_TAG" \
-            --metadata-file "$RUNNER_TEMP/image-metadata.json" \
-            --file deployment/Dockerfile .
-          jq -r '.["containerimage.digest"]' "$RUNNER_TEMP/image-metadata.json" > "$RUNNER_TEMP/oci-digest"
+          IMAGE="ghcr.io/firestige/wsr-evidence:$CANDIDATE_TAG"
+          if docker buildx imagetools inspect "$IMAGE" --format '{{json .Image}}' > "$RUNNER_TEMP/image-config.json" 2>/dev/null; then
+            test "$(jq -r '.config.Labels["org.opencontainers.image.source"] // empty' "$RUNNER_TEMP/image-config.json")" = "https://github.com/firestige/evidence-system"
+            test "$(jq -r '.config.Labels["org.opencontainers.image.revision"] // empty' "$RUNNER_TEMP/image-config.json")" = "$GITHUB_SHA"
+            docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest}}' \
+              | jq -er .digest > "$RUNNER_TEMP/oci-digest"
+          else
+            docker buildx build --push \
+              --tag "$IMAGE" \
+              --build-arg "WSR_RELEASE_REVISION=$GITHUB_SHA" \
+              --metadata-file "$RUNNER_TEMP/image-metadata.json" \
+              --file deployment/Dockerfile .
+            jq -er '.["containerimage.digest"]' "$RUNNER_TEMP/image-metadata.json" > "$RUNNER_TEMP/oci-digest"
+          fi
       - name: Build immutable Python assets and manifest
         run: |
           uv run python -m release.cli.release build \
             "$RUNNER_TEMP/local-release" "$(cat "$RUNNER_TEMP/oci-digest")"
-      - name: Create RC only after local qualification
+      - name: Create or resume RC with exact local assets
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_TAG: ${{ steps.request.outputs.candidate_tag }}
-        run: gh release create "$CANDIDATE_TAG" "$RUNNER_TEMP/local-release/"* --prerelease --target "$GITHUB_SHA"
+          RC_EXISTS: ${{ steps.candidate.outputs.exists }}
+        run: |
+          if test "$RC_EXISTS" != true; then
+            gh release create "$CANDIDATE_TAG" --prerelease --target "$GITHUB_SHA"
+          fi
+          mkdir "$RUNNER_TEMP/existing-assets"
+          for FILE in "$RUNNER_TEMP/local-release/"*; do
+            NAME="$(basename "$FILE")"
+            if gh release view "$CANDIDATE_TAG" --json assets --jq '.assets[].name' | grep -Fxq "$NAME"; then
+              gh release download "$CANDIDATE_TAG" --pattern "$NAME" --dir "$RUNNER_TEMP/existing-assets"
+              cmp "$FILE" "$RUNNER_TEMP/existing-assets/$NAME"
+            else
+              gh release upload "$CANDIDATE_TAG" "$FILE"
+            fi
+          done
       - name: Redownload and verify exact RC assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -102,4 +134,10 @@ jobs:
         run: |
           export CANDIDATE_TAG
           uv run python -c 'import hashlib,json,os,pathlib; p=pathlib.Path(os.environ["RUNNER_TEMP"]); m=(p/"remote-release/release-metadata.json").read_bytes(); d=json.loads(m); q={"schemaVersion":"wsr.release-qualification@1.0.0","candidateTag":os.environ["CANDIDATE_TAG"],"commit":os.environ["GITHUB_SHA"],"artifactMetadataSha256":"sha256:"+hashlib.sha256(m).hexdigest(),"ociDigest":d["ociDigest"],"localAcceptance":{"status":"PASS"},"remoteQualification":{"status":"PASS"}}; (p/"release-qualification.json").write_text(json.dumps(q,indent=2)+"\n")'
-          gh release upload "$CANDIDATE_TAG" "$RUNNER_TEMP/release-qualification.json"
+          if gh release view "$CANDIDATE_TAG" --json assets --jq '.assets[].name' | grep -Fxq release-qualification.json; then
+            mkdir "$RUNNER_TEMP/existing-qualification"
+            gh release download "$CANDIDATE_TAG" --pattern release-qualification.json --dir "$RUNNER_TEMP/existing-qualification"
+            cmp "$RUNNER_TEMP/release-qualification.json" "$RUNNER_TEMP/existing-qualification/release-qualification.json"
+          else
+            gh release upload "$CANDIDATE_TAG" "$RUNNER_TEMP/release-qualification.json"
+          fi

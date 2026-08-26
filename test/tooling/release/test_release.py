@@ -87,11 +87,16 @@ def test_manifest_verifier_requires_wheel_sdist_and_exact_oci_digest(tmp_path: P
 def test_workflows_keep_app_token_at_the_final_github_publish_boundary() -> None:
     candidate = (ROOT / ".github/workflows/release-candidate.yml").read_text()
     promote = (ROOT / ".github/workflows/release-promote.yml").read_text()
+    dockerfile = (ROOT / "deployment/Dockerfile").read_text()
 
     assert "WSR_RELEASE_APP_PRIVATE_KEY" not in candidate
     assert "push:" in candidate
     assert "release/request.json" in candidate
     assert "steps.request.outputs.candidate_tag" in candidate
+    assert "docker buildx imagetools inspect" in candidate
+    assert "org.opencontainers.image.revision" in candidate
+    assert "ARG WSR_RELEASE_REVISION" in dockerfile
+    assert "org.opencontainers.image.revision=$WSR_RELEASE_REVISION" in dockerfile
     assert "workflow_call:" in candidate
     assert 'test "$GITHUB_REF_NAME" = "release/next"' in candidate
     assert "actions/create-github-app-token@" in promote
