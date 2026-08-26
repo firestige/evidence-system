@@ -17,6 +17,7 @@ from wsr_evidence.storage.read_model import (
     Availability,
     Completeness,
     ExpiryBatch,
+    ExpiryOwner,
     ExpiryResult,
     ExpiryState,
     QueryExpiryReadModel,
@@ -117,21 +118,23 @@ def test_retention_policy_rejects_out_of_range_values(overrides: dict[str, objec
 
 def test_expiry_batch_identity_is_canonical_and_rejects_duplicates() -> None:
     cutoff = datetime(2026, 8, 26, tzinfo=UTC)
+    trace_a = ExpiryOwner(resource_kind="NODE", owner_key=("trace-a",))
+    trace_b = ExpiryOwner(resource_kind="LINK", owner_key=("trace-b",))
     first = ExpiryBatch.create(
         resource_class=ResourceClass.TRACE_DETAIL,
         policy_revision="1.0.0",
         cutoff=cutoff,
-        owner_keys=(("trace-b",), ("trace-a",)),
+        members=(trace_b, trace_a),
     )
     second = ExpiryBatch.create(
         resource_class=ResourceClass.TRACE_DETAIL,
         policy_revision="1.0.0",
         cutoff=cutoff,
-        owner_keys=(("trace-a",), ("trace-b",)),
+        members=(trace_a, trace_b),
     )
 
     assert first == second
-    assert first.owner_keys == (("trace-a",), ("trace-b",))
+    assert first.members == (trace_b, trace_a)
     assert len(first.batch_identity) == 64
 
     with pytest.raises(ValueError):
@@ -139,8 +142,22 @@ def test_expiry_batch_identity_is_canonical_and_rejects_duplicates() -> None:
             resource_class=ResourceClass.TRACE_DETAIL,
             policy_revision="1.0.0",
             cutoff=cutoff,
-            owner_keys=(("trace-a",), ("trace-a",)),
+            members=(trace_a, trace_a),
         )
+
+
+def test_equal_owner_keys_in_different_resource_kinds_remain_distinct() -> None:
+    batch = ExpiryBatch.create(
+        resource_class=ResourceClass.FACTUAL_PROJECTION,
+        policy_revision="1.0.0",
+        cutoff=datetime(2026, 8, 26, tzinfo=UTC),
+        members=(
+            ExpiryOwner(resource_kind="FINDING_ASSERTION", owner_key=("same", "key")),
+            ExpiryOwner(resource_kind="ROLE_LINEAGE", owner_key=("same", "key")),
+        ),
+    )
+
+    assert len(batch.members) == 2
 
 
 def test_accepted_provenance_cannot_be_planned_for_expiry() -> None:
@@ -149,7 +166,7 @@ def test_accepted_provenance_cannot_be_planned_for_expiry() -> None:
             resource_class=ResourceClass.ACCEPTED_PROVENANCE,
             policy_revision="1.0.0",
             cutoff=datetime(2026, 8, 26, tzinfo=UTC),
-            owner_keys=(),
+            members=(),
         )
 
 

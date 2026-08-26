@@ -53,6 +53,22 @@ class ResourceClass(StrEnum):
     FACTUAL_PROJECTION = "FACTUAL_PROJECTION"
 
 
+TRACE_RESOURCE_KINDS = frozenset({"NODE", "PARENT_EDGE", "LINK"})
+FACTUAL_RESOURCE_KINDS = frozenset(
+    {
+        "EVENT_CONTRIBUTION",
+        "FINDING_ASSERTION",
+        "FINDING_TARGET",
+        "FINDING_STATUS",
+        "FINDING_FIX",
+        "FINDING_RECHECK",
+        "ROLE_LINEAGE",
+        "DELIVERY_ROOT_BINDING",
+        "MODEL_ATTRIBUTION",
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class TruthState:
     completeness: Completeness | None
@@ -155,6 +171,27 @@ class SnapshotPage[ResourceT]:
 
 
 @dataclass(frozen=True, slots=True)
+class ExpiryOwner:
+    resource_kind: str
+    owner_key: OwnerKey
+
+    def __post_init__(self) -> None:
+        if not self.resource_kind:
+            raise ValueError("expiry resource_kind must be nonempty")
+        _validate_owner_key(self.owner_key)
+
+
+def _validate_expiry_kind(resource_class: ResourceClass, resource_kind: str) -> None:
+    allowed = {
+        ResourceClass.RAW_DEBUG: frozenset({"RAW_DEBUG"}),
+        ResourceClass.TRACE_DETAIL: TRACE_RESOURCE_KINDS,
+        ResourceClass.FACTUAL_PROJECTION: FACTUAL_RESOURCE_KINDS,
+    }.get(resource_class, frozenset())
+    if resource_kind not in allowed:
+        raise ValueError("resource kind is not valid for its expiry class")
+
+
+@dataclass(frozen=True, slots=True)
 class ExpiryRecord:
     resource_class: ResourceClass
     owner_key: OwnerKey
@@ -167,6 +204,7 @@ class ExpiryRecord:
 
     def __post_init__(self) -> None:
         _validate_owner_key(self.owner_key)
+        _validate_expiry_kind(self.resource_class, self.resource_kind)
         _require_aware(self.recorded_at, "recorded_at")
         _require_aware(self.expired_at, "expired_at")
         if not self.resource_kind or not self.policy_revision:
@@ -203,7 +241,7 @@ class ExpiryBatch:
     resource_class: ResourceClass
     policy_revision: str
     cutoff: datetime
-    owner_keys: tuple[OwnerKey, ...]
+    members: tuple[ExpiryOwner, ...]
 
     @classmethod
     def create(
@@ -212,22 +250,39 @@ class ExpiryBatch:
         resource_class: ResourceClass,
         policy_revision: str,
         cutoff: datetime,
-        owner_keys: tuple[OwnerKey, ...],
+        members: tuple[ExpiryOwner, ...],
     ) -> ExpiryBatch:
         if resource_class is ResourceClass.ACCEPTED_PROVENANCE:
             raise ValueError("accepted provenance cannot expire")
         if not policy_revision:
             raise ValueError("policy_revision must be nonempty")
         _require_aware(cutoff, "cutoff")
-        if len(owner_keys) > 1000:
-            raise ValueError("expiry batch cannot exceed 1000 owner keys")
-        canonical = sorted((_canonical_key(owner_key), owner_key) for owner_key in owner_keys)
+        if len(members) > 1000:
+            raise ValueError("expiry batch cannot exceed 1000 members")
+        for member in members:
+            _validate_expiry_kind(resource_class, member.resource_kind)
+        canonical = sorted(
+            (
+                json.dumps(
+                    [member.resource_kind, member.owner_key],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                member,
+            )
+            for member in members
+        )
         if any(left[0] == right[0] for left, right in zip(canonical, canonical[1:], strict=False)):
-            raise ValueError("expiry batch owner keys must be unique")
-        ordered = tuple(owner_key for _, owner_key in canonical)
+            raise ValueError("expiry batch members must be unique")
+        ordered = tuple(member for _, member in canonical)
         normalized_cutoff = cutoff.astimezone(UTC).isoformat().replace("+00:00", "Z")
         encoded = json.dumps(
-            [resource_class.value, policy_revision, normalized_cutoff, ordered],
+            [
+                resource_class.value,
+                policy_revision,
+                normalized_cutoff,
+                [[member.resource_kind, member.owner_key] for member in ordered],
+            ],
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode()
@@ -236,7 +291,7 @@ class ExpiryBatch:
             resource_class=resource_class,
             policy_revision=policy_revision,
             cutoff=cutoff.astimezone(UTC),
-            owner_keys=ordered,
+            members=ordered,
         )
 
 
@@ -277,6 +332,7 @@ class QueryExpiryReadModel[ResourceT](Protocol):
         self,
         *,
         resource_class: ResourceClass,
+        resource_kind: str,
         owner_key: OwnerKey,
         snapshot_id: str,
     ) -> ExpiryRecord | None: ...
