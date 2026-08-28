@@ -198,7 +198,6 @@ async def test_task_list_preserves_id_identity_and_optional_display_name() -> No
     assert response["items"][0]["provenance"] == {
         "accepted_digest": "b" * 64,
         "profile_version": "2.0.0",
-        "recorded_at": "2026-08-26T01:02:03.000000Z",
         "source": {"kind": "EVENT", "event_id": "task-event-1"},
     }
     assert read_model.released == ["snapshot-1"]

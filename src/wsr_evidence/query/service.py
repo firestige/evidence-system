@@ -326,7 +326,7 @@ class QueryService:
             "read_model_revision": "2.0.0",
             "manifest": projection,
             "manifest_projection_digest": projection_digest,
-            "provenance": _task_provenance(effect, include_recorded_at=False),
+            "provenance": _task_provenance(effect),
         }
 
     async def _release(self, snapshot_id: str) -> None:
@@ -893,15 +893,12 @@ def _trace_resource(effect: QueryEffect, *, ttl: timedelta | None) -> dict[str, 
     }
 
 
-def _task_provenance(effect: QueryEffect, *, include_recorded_at: bool) -> dict[str, Any]:
-    provenance: dict[str, Any] = {
+def _task_provenance(effect: QueryEffect) -> dict[str, Any]:
+    return {
         "accepted_digest": effect.accepted_digest,
         "profile_version": effect.profile_version,
         "source": _source(effect),
     }
-    if include_recorded_at:
-        provenance["recorded_at"] = _timestamp(effect.recorded_at)
-    return provenance
 
 
 def _task_list_resource(effect: QueryEffect) -> dict[str, Any]:
@@ -910,7 +907,7 @@ def _task_list_resource(effect: QueryEffect) -> dict[str, Any]:
     return {
         "task_id": effect.key[0],
         "display_name": effect.payload.get("display_name"),
-        "provenance": _task_provenance(effect, include_recorded_at=True),
+        "provenance": _task_provenance(effect),
     }
 
 
@@ -922,7 +919,7 @@ def _task_membership_resource(effect: QueryEffect) -> dict[str, Any]:
         "delivery_id": effect.key[1],
         "manifest_digest": effect.payload["manifest_digest"],
         "recorded_at": _timestamp(effect.recorded_at),
-        "provenance": _task_provenance(effect, include_recorded_at=False),
+        "provenance": _task_provenance(effect),
     }
 
 
