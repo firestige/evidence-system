@@ -7,13 +7,13 @@ import logging
 from datetime import timedelta
 from typing import Protocol
 
-from wsr_evidence.storage.read_model import ExpiryResult
+from wsr_evidence.storage.read_model import DeliveryDeletionResult, ExpiryResult
 
 LOGGER = logging.getLogger(__name__)
 
 
 class RetentionRunner(Protocol):
-    async def run_once(self) -> tuple[ExpiryResult, ...]: ...
+    async def run_once(self) -> tuple[ExpiryResult | DeliveryDeletionResult, ...]: ...
 
 
 async def run_retention_loop(runner: RetentionRunner, *, interval: timedelta) -> None:

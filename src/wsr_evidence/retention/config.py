@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import cast
 
-from wsr_evidence.storage.read_model import RetentionPolicy
+from wsr_evidence.storage.read_model import DeliveryRetentionPolicy
 
 
 def _duration(name: str, default: str, *, never: bool) -> timedelta | None:
@@ -33,22 +33,25 @@ def _integer(name: str, default: str) -> int:
 
 @dataclass(frozen=True, slots=True)
 class RetentionSettings:
-    policy: RetentionPolicy
+    policy: DeliveryRetentionPolicy
 
     @classmethod
     def from_environment(cls) -> RetentionSettings:
-        if "WSR_EVIDENCE_ACCEPTED_PROVENANCE_TTL" in os.environ:
-            raise ValueError("accepted provenance retention is not configurable")
+        retired_variables = (
+            "WSR_EVIDENCE_TRACE_DETAIL_TTL",
+            "WSR_EVIDENCE_FACTUAL_PROJECTION_TTL",
+            "WSR_EVIDENCE_ACCEPTED_PROVENANCE_TTL",
+        )
+        configured = next((name for name in retired_variables if name in os.environ), None)
+        if configured is not None:
+            raise ValueError(f"{configured} is retired; configure Delivery retention as one unit")
         return cls(
-            policy=RetentionPolicy(
+            policy=DeliveryRetentionPolicy(
                 raw_debug_ttl=cast(
                     timedelta,
                     _duration("WSR_EVIDENCE_RAW_DEBUG_TTL", "PT0S", never=False),
                 ),
-                trace_detail_ttl=_duration("WSR_EVIDENCE_TRACE_DETAIL_TTL", "P30D", never=True),
-                factual_projection_ttl=_duration(
-                    "WSR_EVIDENCE_FACTUAL_PROJECTION_TTL", "P365D", never=True
-                ),
+                delivery_ttl=_duration("WSR_EVIDENCE_DELIVERY_TTL", "P30D", never=True),
                 batch_size=_integer("WSR_EVIDENCE_RETENTION_BATCH_SIZE", "500"),
                 interval=timedelta(
                     seconds=_integer("WSR_EVIDENCE_RETENTION_INTERVAL_SECONDS", "60")
