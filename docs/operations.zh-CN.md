@@ -26,24 +26,23 @@ curl --fail http://127.0.0.1:4318/healthz
 ## 自动 retention
 
 Evidence API 随 service process 启动 retention worker。Worker 在启动后立即运行一次，之后按配置的
-interval 周期运行。每轮按 Raw debug、Trace detail、factual projection 的顺序，对每个 enabled
-resource class 最多处理一个 bounded batch。某轮失败会被记录，但不会终止 API；后续 scheduled
-iteration 会再次尝试。
+interval 周期运行。Raw debug 保留独立 privacy scrub；queryable Evidence 使用另一个 terminal
+Delivery identity bounded batch。某轮失败会被记录，但不会终止 API；后续 scheduled iteration 会重试。
 
 Retention 仅由数据年龄与启动时 policy 驱动，不等待 ingest failure，也不检查 database size 或 free
-disk space。Expiry 会清除符合条件的 payload，并保留已发布的 identity、provenance、tombstone 与
-availability/expiry state；它不是 manual Delivery deletion facility。
+disk space。Accepted terminal `delivery.summary` 超过 Delivery TTL 后，一个 transaction 物理删除该
+Delivery 的 queryable Facts、Trace detail、Task membership/guard 与 Manifest。没有 trash/restore。
+最小 query-invisible retirement fence 只防止迟到数据复活，不包含可恢复 dataset。
 
 | 环境变量 | 默认值 | 合法值 | 含义 |
 |---|---:|---|---|
 | `WSR_EVIDENCE_RAW_DEBUG_TTL` | `PT0S` | `PT0S`、`P0D` 或 `P1D` | Raw debug 立即或一天后可回收；禁止 `NEVER` |
-| `WSR_EVIDENCE_TRACE_DETAIL_TTL` | `P30D` | `P1D`–`P365D` 的整天数，或 `NEVER` | Trace detail retention age |
-| `WSR_EVIDENCE_FACTUAL_PROJECTION_TTL` | `P365D` | `P30D`–`P3650D` 的整天数，或 `NEVER` | factual projection retention age |
-| `WSR_EVIDENCE_RETENTION_BATCH_SIZE` | `500` | 整数 `1`–`1000` | 每轮每个 enabled class 最多处理的 resource 数 |
+| `WSR_EVIDENCE_DELIVERY_TTL` | `P30D` | `P1D`–`P3650D` 的整天数，或 `NEVER` | accepted terminal summary 后到 physical Delivery deletion 的年龄 |
+| `WSR_EVIDENCE_RETENTION_BATCH_SIZE` | `500` | 整数 `1`–`1000` | 每轮最多处理的 Delivery 数 |
 | `WSR_EVIDENCE_RETENTION_INTERVAL_SECONDS` | `60` | 整秒 `10`–`3600` | 两轮之间的等待时间 |
 
-Accepted identity/provenance 永不过期。因此，设置
-`WSR_EVIDENCE_ACCEPTED_PROVENANCE_TTL` 会导致 startup error，而不是覆盖默认值。Duration syntax
+Deleted Delivery 的 accepted record content 会被移除，只保留 non-queryable retirement fence。
+设置 legacy Trace/factual/provenance TTL 变量会导致 startup error。Duration syntax
 有意保持收敛：只接受 `PT0S`、整天 `P<n>D`，以及表中明确允许位置的 `NEVER`。全部 retention
 setting 都在启动时读取，修改后需要重启 Evidence API。
 
@@ -55,13 +54,12 @@ service；只在 host export 一个未映射变量不会把它传入 container�
 services:
   evidence:
     environment:
-      WSR_EVIDENCE_TRACE_DETAIL_TTL: P90D
-      WSR_EVIDENCE_FACTUAL_PROJECTION_TTL: P730D
+      WSR_EVIDENCE_DELIVERY_TTL: P90D
       WSR_EVIDENCE_RETENTION_BATCH_SIZE: "500"
 ```
 
-MVP 不提供 disk-pressure cleanup、write-failure-triggered cleanup、manual delete API、Delivery-atomic
-garbage collection 或 automatic capacity tuning。运维方应独立监控 storage/backup，并只在上述已验证
+MVP 不提供 disk-pressure cleanup、write-failure-triggered cleanup、manual delete API、logical deletion、
+restore 或 automatic capacity tuning。运维方应独立监控 storage/backup，并只在上述已验证
 范围内调整 bounded policy。
 
 ## 网络负向检查

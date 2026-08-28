@@ -23,24 +23,25 @@ Do not copy these development credentials into another installation. Supply inst
 ## Automatic retention
 
 The Evidence API starts its retention worker with the service process. The worker runs once immediately
-after startup and then once per configured interval. Each iteration processes at most one bounded batch
-for each enabled resource class, in this order: Raw debug, Trace detail, and factual projection. A failed
-iteration is logged without terminating the API; a later scheduled iteration tries again.
+after startup and then once per configured interval. Raw debug keeps its independent privacy scrub.
+Queryable Evidence uses a separate bounded batch of terminal Delivery identities. A failed iteration
+is logged without terminating the API; a later scheduled iteration tries again.
 
 Retention is driven only by age and the startup policy. It does not wait for an ingest failure or check
-database size or free disk space. Expiry scrubs eligible payloads and retains the published identity,
-provenance, tombstone, and availability/expiry state; it is not a manual Delivery-deletion facility.
+database size or free disk space. When an accepted terminal `delivery.summary` ages past the Delivery
+TTL, one transaction physically deletes that Delivery's queryable Facts, Trace detail, Task
+membership/guard and Manifest. There is no trash or restore path. A minimal query-invisible retirement
+fence prevents late recreation and contains no recoverable dataset.
 
 | Environment variable | Default | Accepted value | Meaning |
 |---|---:|---|---|
 | `WSR_EVIDENCE_RAW_DEBUG_TTL` | `PT0S` | `PT0S`, `P0D`, or `P1D` | Raw debug becomes eligible immediately or after one day; `NEVER` is forbidden |
-| `WSR_EVIDENCE_TRACE_DETAIL_TTL` | `P30D` | whole days from `P1D` through `P365D`, or `NEVER` | Retention age for Trace detail |
-| `WSR_EVIDENCE_FACTUAL_PROJECTION_TTL` | `P365D` | whole days from `P30D` through `P3650D`, or `NEVER` | Retention age for factual projections |
-| `WSR_EVIDENCE_RETENTION_BATCH_SIZE` | `500` | integer `1`–`1000` | Maximum resources processed per enabled class in one iteration |
+| `WSR_EVIDENCE_DELIVERY_TTL` | `P30D` | whole days from `P1D` through `P3650D`, or `NEVER` | Age after accepted terminal summary before physical Delivery deletion |
+| `WSR_EVIDENCE_RETENTION_BATCH_SIZE` | `500` | integer `1`–`1000` | Maximum Deliveries processed in one iteration |
 | `WSR_EVIDENCE_RETENTION_INTERVAL_SECONDS` | `60` | whole seconds `10`–`3600` | Delay between iterations |
 
-Accepted identity and provenance never expire. Setting
-`WSR_EVIDENCE_ACCEPTED_PROVENANCE_TTL` is therefore a startup error, rather than an override. Duration
+Accepted record content belonging to a deleted Delivery is removed. Only the non-queryable retirement
+fence remains. Setting legacy Trace/factual/provenance TTL variables is a startup error. Duration
 syntax is intentionally narrow: only `PT0S`, whole-day `P<n>D`, and `NEVER` where listed are accepted.
 All retention settings are read at startup, so changing one requires restarting the Evidence API.
 
@@ -53,13 +54,12 @@ the container. For example:
 services:
   evidence:
     environment:
-      WSR_EVIDENCE_TRACE_DETAIL_TTL: P90D
-      WSR_EVIDENCE_FACTUAL_PROJECTION_TTL: P730D
+      WSR_EVIDENCE_DELIVERY_TTL: P90D
       WSR_EVIDENCE_RETENTION_BATCH_SIZE: "500"
 ```
 
 The MVP provides no disk-pressure cleanup, write-failure-triggered cleanup, manual delete API,
-Delivery-atomic garbage collection, or automatic capacity tuning. Operators should monitor storage and
+logical deletion, restore, or automatic capacity tuning. Operators should monitor storage and
 backup independently and adjust the bounded policy only within the validated ranges above.
 
 ## Network negatives
