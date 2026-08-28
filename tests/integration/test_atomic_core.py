@@ -116,7 +116,11 @@ async def table_count(database_url: str, table: str) -> int:
 
 async def clear_core(database_url: str) -> None:
     async with await psycopg.AsyncConnection.connect(database_url) as connection:
-        await connection.execute("TRUNCATE projection_effects, accepted_records")
+        await connection.execute(
+            "TRUNCATE delivery_retirement_fences, delivery_terminal_anchors, "
+            "delivery_record_memberships, retention_expiry_markers, projection_effects, "
+            "accepted_records"
+        )
 
 
 def lifecycle_record(

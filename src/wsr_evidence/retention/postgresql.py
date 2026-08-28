@@ -10,6 +10,8 @@ from psycopg_pool import AsyncConnectionPool
 
 from wsr_evidence.storage.postgresql import PostgresStorage
 from wsr_evidence.storage.read_model import (
+    DeliveryDeletionBatch,
+    DeliveryDeletionResult,
     ExpiryBatch,
     ExpiryOwner,
     ExpiryResult,
@@ -269,6 +271,169 @@ class PostgresRetentionMaintenance:
             selected=len(batch.members),
             expired=expired,
             already_expired=already_expired,
+        )
+
+    async def plan_delivery_deletion(
+        self,
+        *,
+        policy_revision: str,
+        cutoff: datetime,
+        ttl_seconds: int,
+        limit: int,
+    ) -> DeliveryDeletionBatch:
+        if not 1 <= limit <= 1000:
+            raise ValueError("retention plan limit must be in [1,1000]")
+        async with self._pool.connection() as connection, connection.cursor() as cursor:
+            await cursor.execute(
+                """
+                SELECT anchor.delivery_id
+                FROM delivery_terminal_anchors anchor
+                LEFT JOIN delivery_retirement_fences fence
+                  ON fence.delivery_id = anchor.delivery_id
+                WHERE anchor.recorded_at <= %s AND fence.delivery_id IS NULL
+                ORDER BY anchor.delivery_id COLLATE "C"
+                LIMIT %s
+                """,
+                (cutoff, limit),
+            )
+            rows = await cursor.fetchall()
+        return DeliveryDeletionBatch.create(
+            policy_revision=policy_revision,
+            cutoff=cutoff,
+            ttl_seconds=ttl_seconds,
+            delivery_ids=tuple(str(row[0]) for row in rows),
+        )
+
+    async def apply_delivery_deletion(
+        self, *, batch: DeliveryDeletionBatch, clock_now: datetime
+    ) -> DeliveryDeletionResult:
+        deleted = 0
+        already_deleted = 0
+        async with self._pool.connection() as connection, connection.transaction():
+            for delivery_id in batch.delivery_ids:
+                async with connection.cursor() as cursor:
+                    await cursor.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                        (f"delivery:{delivery_id}",),
+                    )
+                    await cursor.execute(
+                        "SELECT 1 FROM delivery_retirement_fences WHERE delivery_id = %s",
+                        (delivery_id,),
+                    )
+                    if await cursor.fetchone() is not None:
+                        already_deleted += 1
+                        continue
+                    await cursor.execute(
+                        """
+                        SELECT 1 FROM delivery_terminal_anchors
+                        WHERE delivery_id = %s AND recorded_at <= %s
+                        FOR UPDATE
+                        """,
+                        (delivery_id, batch.cutoff),
+                    )
+                    if await cursor.fetchone() is None:
+                        raise RuntimeError("planned terminal Delivery disappeared before deletion")
+                    await self._preserve_referenced_task(cursor, delivery_id)
+                    await cursor.execute(
+                        """
+                        DELETE FROM projection_effects pe
+                        USING delivery_record_memberships member
+                        WHERE member.delivery_id = %s
+                          AND pe.source_identity_kind = member.identity_kind
+                          AND pe.source_identity_key = member.identity_key
+                        """,
+                        (delivery_id,),
+                    )
+                    await cursor.execute(
+                        """
+                        DELETE FROM retention_expiry_markers marker
+                        USING delivery_record_memberships member
+                        WHERE member.delivery_id = %s
+                          AND marker.source_identity_kind = member.identity_kind
+                          AND marker.source_identity_key = member.identity_key
+                        """,
+                        (delivery_id,),
+                    )
+                    await cursor.execute(
+                        """
+                        DELETE FROM accepted_records record
+                        USING delivery_record_memberships member
+                        WHERE member.delivery_id = %s
+                          AND record.identity_kind = member.identity_kind
+                          AND record.identity_key = member.identity_key
+                        """,
+                        (delivery_id,),
+                    )
+                    await cursor.execute(
+                        """
+                        INSERT INTO delivery_retirement_fences
+                            (delivery_id, retired_at, policy_revision)
+                        VALUES (%s, %s, %s)
+                        """,
+                        (delivery_id, clock_now, batch.policy_revision),
+                    )
+                    deleted += 1
+        return DeliveryDeletionResult(
+            batch_identity=batch.batch_identity,
+            selected=len(batch.delivery_ids),
+            deleted=deleted,
+            already_deleted=already_deleted,
+        )
+
+    @staticmethod
+    async def _preserve_referenced_task(cursor: Any, delivery_id: str) -> None:
+        await cursor.execute(
+            """
+            SELECT guard.payload ->> 'task_id'
+            FROM projection_effects guard
+            WHERE guard.effect_kind = 'delivery_task_guard'
+              AND guard.effect_key = %s
+            """,
+            (_key_json((delivery_id,)),),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return
+        task_id = str(row[0])
+        await cursor.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (f"task:{task_id}",),
+        )
+        await cursor.execute(
+            """
+            SELECT membership.source_identity_kind, membership.source_identity_key
+            FROM projection_effects membership
+            WHERE membership.effect_kind = 'delivery_task_membership'
+              AND membership.effect_key::jsonb ->> 0 = %s
+              AND membership.effect_key::jsonb ->> 1 <> %s
+            ORDER BY membership.effect_key COLLATE "C"
+            LIMIT 1
+            """,
+            (task_id, delivery_id),
+        )
+        remaining = await cursor.fetchone()
+        if remaining is None:
+            return
+        await cursor.execute(
+            """
+            UPDATE projection_effects
+            SET source_identity_kind = %s, source_identity_key = %s
+            WHERE effect_kind = ANY(%s)
+              AND effect_key = %s
+              AND EXISTS (
+                  SELECT 1 FROM delivery_record_memberships member
+                  WHERE member.delivery_id = %s
+                    AND member.identity_kind = projection_effects.source_identity_kind
+                    AND member.identity_key = projection_effects.source_identity_key
+              )
+            """,
+            (
+                remaining[0],
+                remaining[1],
+                ["task_declaration", "task_display_name"],
+                _key_json((task_id,)),
+                delivery_id,
+            ),
         )
 
     @staticmethod

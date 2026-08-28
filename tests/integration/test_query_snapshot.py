@@ -69,6 +69,14 @@ def delivery_summary_record(
     }
 
 
+def profile_two_delivery_summary(delivery_id: str, event_id: str) -> dict[str, Any]:
+    record = delivery_summary_record(event_id)
+    record["profile_version"] = "2.0.0"
+    record["scope"]["version"] = "2.0.0"
+    record["attributes"]["agentops.delivery.id"] = delivery_id
+    return record
+
+
 def span_record(trace_id: str, *, delivery_id: str = "delivery-1") -> dict[str, Any]:
     span_id = "a" * 16
     return {
@@ -100,6 +108,13 @@ def span_record(trace_id: str, *, delivery_id: str = "delivery-1") -> dict[str, 
             "agentops.workflow.family": "implementation",
         },
     }
+
+
+def profile_two_span(trace_id: str, *, delivery_id: str) -> dict[str, Any]:
+    record = span_record(trace_id, delivery_id=delivery_id)
+    record["profile_version"] = "2.0.0"
+    record["scope"]["version"] = "2.0.0"
+    return record
 
 
 def task_binding_record(
@@ -157,7 +172,9 @@ def task_binding_record(
 async def clear_core(database_url: str) -> None:
     async with await psycopg.AsyncConnection.connect(database_url) as connection:
         await connection.execute(
-            "TRUNCATE retention_expiry_markers, projection_effects, accepted_records"
+            "TRUNCATE delivery_retirement_fences, delivery_terminal_anchors, "
+            "delivery_record_memberships, retention_expiry_markers, projection_effects, "
+            "accepted_records"
         )
 
 
@@ -619,6 +636,107 @@ async def test_retention_batch_failure_rolls_back_scrub_and_tombstone() -> None:
             marker_row = await marker.fetchone()
         assert raw_row is not None and raw_row[0] != {}
         assert marker_row == (0,)
+    finally:
+        await storage.close()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_delivery_deletion_reference_counts_task_and_blocks_late_recreation() -> None:
+    database_url = os.environ.get("WSR_EVIDENCE_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("WSR_EVIDENCE_DATABASE_URL is not configured")
+    await clear_core(database_url)
+    storage = await PostgresStorage.open(database_url)
+    admission = AdmissionService(storage)
+    maintenance = PostgresRetentionMaintenance.from_storage(storage)
+    now = datetime(2026, 8, 28, 12, tzinfo=UTC)
+    try:
+        for delivery_id, display_name in (
+            ("delivery-1", "Token tuning"),
+            ("delivery-2", None),
+        ):
+            assert (
+                await admission.admit(
+                    task_binding_record(
+                        delivery_id=delivery_id,
+                        event_id="ignored",
+                        display_name=display_name,
+                    )
+                )
+            ).disposition is Disposition.ACCEPTED
+            assert (
+                await admission.admit(
+                    profile_two_delivery_summary(delivery_id, f"summary-{delivery_id}")
+                )
+            ).disposition is Disposition.ACCEPTED
+            assert (
+                await admission.admit(
+                    profile_two_span(
+                        ("1" if delivery_id == "delivery-1" else "2") * 32,
+                        delivery_id=delivery_id,
+                    )
+                )
+            ).disposition is Disposition.ACCEPTED
+
+        async with storage._pool.connection() as connection:  # noqa: SLF001
+            await connection.execute(
+                "UPDATE delivery_terminal_anchors SET recorded_at = %s WHERE delivery_id = %s",
+                (now - timedelta(days=31), "delivery-1"),
+            )
+        first = await maintenance.plan_delivery_deletion(
+            policy_revision="2.0.0",
+            cutoff=now - timedelta(days=30),
+            ttl_seconds=30 * 86_400,
+            limit=10,
+        )
+        assert first.delivery_ids == ("delivery-1",)
+        assert (await maintenance.apply_delivery_deletion(batch=first, clock_now=now)).deleted == 1
+
+        async with storage._pool.connection() as connection:  # noqa: SLF001
+            task_rows = await connection.execute(
+                "SELECT effect_kind FROM projection_effects "
+                "WHERE effect_kind = ANY(%s) ORDER BY effect_kind",
+                (["task_declaration", "task_display_name"],),
+            )
+            assert [row[0] async for row in task_rows] == [
+                "task_declaration",
+                "task_display_name",
+            ]
+            active = await connection.execute(
+                "SELECT effect_key FROM projection_effects "
+                "WHERE effect_kind = 'delivery_task_membership'"
+            )
+            assert [row[0] async for row in active] == ['["task-1","delivery-2"]']
+            traces = await connection.execute(
+                "SELECT effect_key FROM projection_effects WHERE effect_kind = 'trace_node'"
+            )
+            assert [row[0] async for row in traces] == [
+                '["22222222222222222222222222222222","aaaaaaaaaaaaaaaa"]'
+            ]
+        assert (
+            await admission.admit(profile_two_delivery_summary("delivery-1", "late-summary"))
+        ).disposition is Disposition.REJECTED
+
+        async with storage._pool.connection() as connection:  # noqa: SLF001
+            await connection.execute(
+                "UPDATE delivery_terminal_anchors SET recorded_at = %s WHERE delivery_id = %s",
+                (now - timedelta(days=31), "delivery-2"),
+            )
+        second = await maintenance.plan_delivery_deletion(
+            policy_revision="2.0.0",
+            cutoff=now - timedelta(days=30),
+            ttl_seconds=30 * 86_400,
+            limit=10,
+        )
+        assert second.delivery_ids == ("delivery-2",)
+        await maintenance.apply_delivery_deletion(batch=second, clock_now=now)
+        async with storage._pool.connection() as connection:  # noqa: SLF001
+            task_count = await connection.execute(
+                "SELECT count(*) FROM projection_effects WHERE effect_kind = ANY(%s)",
+                (["task_declaration", "task_display_name"],),
+            )
+            assert (await task_count.fetchone())[0] == 0
     finally:
         await storage.close()
 
