@@ -14,7 +14,7 @@ evidence-system 是 workflow-self-recursive 的 Evidence System —— 一个可
 
 ## Developer preview
 
-本仓库是 workflow-self-recursive 架构优先开发者预览版的一部分，适用于个人或小团队的可信本地环境。当前 scaffold 已可构建、可测试；admission、projection、query 与 retention 行为将在 Iteration 4 后续 wave 实现。**后续会有破坏兼容性的变更。**
+本仓库是 workflow-self-recursive 架构优先开发者预览版的一部分，适用于个人或小团队的可信本地环境。Admission、projection、query、automatic retention 与本地 deployment 均已实现且可测试。**后续会有破坏兼容性的变更。**
 
 ## 开发
 
@@ -33,7 +33,7 @@ make check        # 非容器质量/构建门
 
 受支持的 Compose 部署只在 `127.0.0.1:4318` 发布 API；PostgreSQL 不向宿主机发布端口。运行时启动不会隐式执行 migration。
 
-本地启动、数据库角色分离、文件型 secret、只读备份、拒绝覆盖的恢复流程与精确网络负向检查见 [Evidence local operations](docs/operations.md)。
+本地启动、automatic retention、数据库角色分离、文件型 secret、只读备份、拒绝覆盖的恢复流程与精确网络负向检查见 [Evidence 本地运维](docs/operations.zh-CN.md)。
 
 ## 获取源码
 
@@ -53,6 +53,7 @@ git clone https://github.com/firestige/evidence-system.git
 
 - [Evidence System 设计](https://github.com/firestige/workflow-self-recursive/blob/main/docs/systems/evidence/evidence-system.zh-CN.md)
 - [Evidence 实现基线](https://github.com/firestige/workflow-self-recursive/blob/main/docs/systems/evidence/implementation-baseline.zh-CN.md)
+- [Evidence 本地运维与 retention](docs/operations.zh-CN.md)
 - [概念架构](https://github.com/firestige/workflow-self-recursive/blob/main/docs/agent-architecture.zh-CN.md)
 - [Observation Catalog](https://github.com/firestige/workflow-self-recursive/blob/main/docs/contracts/observation/observation-catalog.zh-CN.md)
 - [OTel Observation Profile](https://github.com/firestige/workflow-self-recursive/blob/main/docs/contracts/observation/otel-observation-profile.zh-CN.md)

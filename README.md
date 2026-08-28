@@ -14,7 +14,7 @@ The first release runs as one local Evidence API service and one internal Postgr
 
 ## Developer preview
 
-This repository is part of workflow-self-recursive's architecture-first developer preview for trusted local use by individuals and small teams. The current scaffold is buildable and testable; admission, projection, query, and retention behavior will arrive in later Iteration 4 waves. **THERE WILL BE COMPATIBILITY-BREAKING CHANGES.**
+This repository is part of workflow-self-recursive's architecture-first developer preview for trusted local use by individuals and small teams. Admission, projection, query, automatic retention, and the local deployment are implemented and testable. **THERE WILL BE COMPATIBILITY-BREAKING CHANGES.**
 
 ## Development
 
@@ -53,6 +53,7 @@ git clone https://github.com/firestige/evidence-system.git
 
 - [Evidence System design](https://github.com/firestige/workflow-self-recursive/blob/main/docs/systems/evidence/evidence-system.md)
 - [Evidence implementation baseline](https://github.com/firestige/workflow-self-recursive/blob/main/docs/systems/evidence/implementation-baseline.md)
+- [Evidence local operations and retention](docs/operations.md)
 - [Conceptual architecture](https://github.com/firestige/workflow-self-recursive/blob/main/docs/agent-architecture.md)
 - [Observation Catalog](https://github.com/firestige/workflow-self-recursive/blob/main/docs/contracts/observation/observation-catalog.md)
 - [OTel Observation Profile](https://github.com/firestige/workflow-self-recursive/blob/main/docs/contracts/observation/otel-observation-profile.md)
