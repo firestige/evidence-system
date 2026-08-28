@@ -34,6 +34,11 @@ disk space。Accepted terminal `delivery.summary` 超过 Delivery TTL 后，一�
 Delivery 的 queryable Facts、Trace detail、Task membership/guard 与 Manifest。没有 trash/restore。
 最小 query-invisible retirement fence 只防止迟到数据复活，不包含可恢复 dataset。
 
+Automatic Delivery deletion 只适用于每个 accepted Event/Span 都直接携带 Delivery ID 的 Profile 2
+dataset。Frozen Profile 1 record 不回填，也不通过 Trace/time inference 分配 owner。Task membership
+row 是引用 authority：还有其他 Delivery 引用时保留 immutable Task declaration/display name，最后一条
+membership 删除时一并回收。
+
 | 环境变量 | 默认值 | 合法值 | 含义 |
 |---|---:|---|---|
 | `WSR_EVIDENCE_RAW_DEBUG_TTL` | `PT0S` | `PT0S`、`P0D` 或 `P1D` | Raw debug 立即或一天后可回收；禁止 `NEVER` |

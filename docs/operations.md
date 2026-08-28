@@ -33,6 +33,11 @@ TTL, one transaction physically deletes that Delivery's queryable Facts, Trace d
 membership/guard and Manifest. There is no trash or restore path. A minimal query-invisible retirement
 fence prevents late recreation and contains no recoverable dataset.
 
+Automatic Delivery deletion applies to Profile 2 datasets whose every accepted Event and Span carries
+the direct Delivery ID. Frozen Profile 1 records are not backfilled or assigned by Trace/time inference.
+Task membership rows are the reference authority: deletion keeps the immutable Task declaration and
+display name while another Delivery references them, and removes them with the final membership.
+
 | Environment variable | Default | Accepted value | Meaning |
 |---|---:|---|---|
 | `WSR_EVIDENCE_RAW_DEBUG_TTL` | `PT0S` | `PT0S`, `P0D`, or `P1D` | Raw debug becomes eligible immediately or after one day; `NEVER` is forbidden |
