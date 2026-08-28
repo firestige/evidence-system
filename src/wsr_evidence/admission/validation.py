@@ -562,6 +562,12 @@ def _validate_event(record: dict[str, Any], attributes: dict[str, Any]) -> None:
     if disallowed:
         raise ValidationError(f"{sorted(disallowed)[0]} prohibited on {event_name}")
     _require(required <= set(attributes), f"incomplete closed field set for {event_name}")
+    if event_name == "task.binding":
+        _require(
+            re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/@-]*", attributes["agentops.task.id"])
+            is not None,
+            "task id is invalid",
+        )
     family = attributes.get("agentops.workflow.family")
     schema = attributes.get("agentops.family.schema")
     if event_name not in {"sampling.decision", "task.binding"}:

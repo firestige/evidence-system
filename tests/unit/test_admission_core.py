@@ -53,10 +53,12 @@ def finding_record(*, event_id: str = "event-1", target_id: str = "artifact-1") 
     }
 
 
-def task_binding_record(*, display_name: str | None = "Token tuning") -> dict[str, Any]:
+def task_binding_record(
+    *, display_name: str | None = "Token tuning", task_id: str = "task-1"
+) -> dict[str, Any]:
     attributes = {
         "agentops.delivery.id": "delivery-1",
-        "agentops.task.id": "task-1",
+        "agentops.task.id": task_id,
         "agentops.manifest.digest": "a" * 64,
         "agentops.event.id": "task-binding-delivery-1",
     }
@@ -138,6 +140,10 @@ def test_profile_two_accepts_only_the_closed_task_binding_carrier() -> None:
     whitespace = task_binding_record(display_name=" padded ")
     with pytest.raises(ValidationError, match="task display name"):
         validate_record(whitespace)
+
+    for invalid_task_id in ("task id", "?task", "a" * 129):
+        with pytest.raises(ValidationError, match=r"task id|agentops\.task\.id"):
+            validate_record(task_binding_record(task_id=invalid_task_id))
 
 
 def test_task_binding_projects_atomic_identity_membership_guard_and_optional_name() -> None:

@@ -67,6 +67,47 @@ def sampling_record(event_id: str, *, unknown: bool = False) -> LogRecord:
     return LogRecord(event_name="sampling.decision", attributes=attributes)
 
 
+def task_binding_log() -> LogRecord:
+    return LogRecord(
+        event_name="task.binding",
+        attributes=[
+            _kv("agentops.delivery.id", "delivery-1"),
+            _kv("agentops.task.id", "task-1"),
+            _kv("agentops.manifest.digest", "a" * 64),
+            _kv("agentops.event.id", "task-binding-delivery-1"),
+            _kv("agentops.task.display_name", "Token tuning"),
+        ],
+    )
+
+
+def mixed_profile_log_request() -> bytes:
+    resource = Resource(attributes=[_kv("service.name", "dsh"), _kv("service.version", "1")])
+    request = ExportLogsServiceRequest(
+        resource_logs=[
+            ResourceLogs(
+                resource=resource,
+                scope_logs=[
+                    ScopeLogs(
+                        scope=InstrumentationScope(
+                            name="io.agentops.dsh.observation", version="1.0.0"
+                        ),
+                        schema_url="https://opentelemetry.io/schemas/1.41.0",
+                        log_records=[sampling_record("event-1")],
+                    ),
+                    ScopeLogs(
+                        scope=InstrumentationScope(
+                            name="io.agentops.dsh.observation", version="2.0.0"
+                        ),
+                        schema_url="https://opentelemetry.io/schemas/1.41.0",
+                        log_records=[task_binding_log()],
+                    ),
+                ],
+            )
+        ]
+    )
+    return request.SerializeToString()
+
+
 def usage_record(index: int) -> LogRecord:
     return LogRecord(
         event_name="usage",
@@ -157,6 +198,33 @@ def test_official_otlp_log_protobuf_decodes_to_closed_logical_record() -> None:
     assert records[0]["record_type"] == "event"
     assert records[0]["event_name"] == "sampling.decision"
     assert records[0]["attributes"]["agentops.sampling.probability"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_profile_two_task_protobuf_projects_the_exact_authority_slice() -> None:
+    records = decode_logs_request(mixed_profile_log_request())
+    task = records[1]
+
+    validated = validate_record(task)
+    effects = AdmissionService.project(validated)
+
+    assert task["profile_version"] == "2.0.0"
+    assert [effect.kind for effect in effects] == [
+        "task_declaration",
+        "delivery_task_membership",
+        "delivery_task_guard",
+        "task_display_name",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mixed_profile_request_is_rejected_before_any_record_lands() -> None:
+    storage = MemoryStorage()
+    outcome = await OtlpIngestor(AdmissionService(storage)).ingest_logs(mixed_profile_log_request())
+
+    assert outcome.http_status == 400
+    assert outcome.rejected_items == 2
+    assert storage.state["identities"] == {}
 
 
 def test_official_otlp_trace_protobuf_preserves_native_identity_fields() -> None:
