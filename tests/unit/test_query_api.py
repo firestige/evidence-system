@@ -88,12 +88,14 @@ class FakeReadModel:
         expiries: dict[tuple[object, ...], ExpiryRecord] | None = None,
         trace_summaries: tuple[TraceSummary, ...] | None = None,
         continuation_fault: SnapshotFault | None = None,
+        manifest: QueryEffect | None = None,
     ) -> None:
         self.resources = resources
         self.expiry = expiry
         self.expiries = expiries or {}
         self.trace_summaries = trace_summaries
         self.continuation_fault = continuation_fault
+        self.manifest = manifest
         self.released: list[str] = []
         self.acquired: list[tuple[str, tuple[tuple[str, str], ...], int]] = []
         self.last_query = "FACTS"
@@ -144,6 +146,11 @@ class FakeReadModel:
 
     async def release_snapshot(self, snapshot_id: str) -> None:
         self.released.append(snapshot_id)
+
+    async def read_manifest(self, *, manifest_digest: str) -> QueryEffect | None:
+        if self.manifest is None or self.manifest.key != (manifest_digest,):
+            return None
+        return self.manifest
 
 
 def task_effect(
@@ -262,6 +269,79 @@ async def test_http_task_query_is_read_only_and_rejects_repeated_filters() -> No
     assert repeated.status_code == 400
     assert repeated.json()["error"]["code"] == "INVALID_FILTER"
     assert body.status_code == 400
+    assert write.status_code == 405
+
+
+@pytest.mark.asyncio
+async def test_exact_manifest_query_returns_one_closed_projection_without_snapshot() -> None:
+    projection = {
+        "schema_version": "execution.delivery-manifest-projection@1.0.0",
+        "delivery_id": "delivery-2",
+        "task_id": "task-a",
+        "manifest_digest": MANIFEST_DIGEST,
+        "workflow": {},
+        "repository_model_bindings": {},
+        "roles": [],
+    }
+    canonical = json.dumps(projection, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    effect = task_effect(
+        kind="delivery_manifest",
+        key=(MANIFEST_DIGEST,),
+        payload={
+            "canonical_projection": canonical,
+            "projection_digest": __import__("hashlib").sha256(canonical.encode()).hexdigest(),
+        },
+    )
+    service = QueryService(FakeReadModel((), manifest=effect))
+
+    response = await service.manifest({"manifest_digest": MANIFEST_DIGEST})
+
+    assert "snapshot" not in response
+    assert response == {
+        "contract": {"name": "evidence.query", "revision": "1.0.0"},
+        "observation_profile": "2.0.0",
+        "read_model_revision": "2.0.0",
+        "manifest": projection,
+        "manifest_projection_digest": effect.payload["projection_digest"],
+        "provenance": {
+            "accepted_digest": "b" * 64,
+            "profile_version": "2.0.0",
+            "source": {"kind": "EVENT", "event_id": "task-event-1"},
+        },
+    }
+
+    with pytest.raises(QueryError) as missing:
+        await QueryService(FakeReadModel(())).manifest({"manifest_digest": MANIFEST_DIGEST})
+    assert missing.value.code is QueryErrorCode.NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_manifest_http_route_is_exact_read_only_and_integrity_checked() -> None:
+    canonical = json.dumps(
+        {"manifest_digest": MANIFEST_DIGEST}, sort_keys=True, separators=(",", ":")
+    )
+    corrupt = task_effect(
+        kind="delivery_manifest",
+        key=(MANIFEST_DIGEST,),
+        payload={"canonical_projection": canonical, "projection_digest": "f" * 64},
+    )
+    transport = ASGITransport(
+        app=create_app(query_service=QueryService(FakeReadModel((), manifest=corrupt)))
+    )
+    async with AsyncClient(transport=transport, base_url="http://evidence.test") as client:
+        integrity = await client.get(f"/v1/evidence/manifests?manifest_digest={MANIFEST_DIGEST}")
+        repeated = await client.get(
+            f"/v1/evidence/manifests?manifest_digest={MANIFEST_DIGEST}&manifest_digest={'a' * 64}"
+        )
+        extra = await client.get(
+            f"/v1/evidence/manifests?manifest_digest={MANIFEST_DIGEST}&limit=1"
+        )
+        write = await client.post("/v1/evidence/manifests", json={})
+
+    assert integrity.status_code == 500
+    assert integrity.json()["error"]["code"] == "QUERY_INTERNAL"
+    assert repeated.status_code == 400
+    assert extra.status_code == 400
     assert write.status_code == 405
 
 

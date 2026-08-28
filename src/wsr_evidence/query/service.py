@@ -9,11 +9,12 @@ import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from hashlib import sha256
 from typing import Any, cast
 
 from wsr_evidence.clock import Clock, SystemClock
 from wsr_evidence.query.faults import SnapshotError, SnapshotFault
-from wsr_evidence.query.model import QueryEffect, SnapshotReleaser
+from wsr_evidence.query.model import ManifestReader, QueryEffect, SnapshotReleaser
 from wsr_evidence.storage.read_model import (
     DEFAULT_PAGE_LIMIT,
     MAX_PAGE_LIMIT,
@@ -151,6 +152,7 @@ class QueryErrorCode(StrEnum):
     ROUTE_NOT_FOUND = "ROUTE_NOT_FOUND"
     QUERY_INTERNAL = "QUERY_INTERNAL"
     QUERY_UNAVAILABLE = "QUERY_UNAVAILABLE"
+    NOT_FOUND = "NOT_FOUND"
 
 
 class QueryError(Exception):
@@ -270,6 +272,62 @@ class QueryService:
         if cursor is None and page.next_cursor is None:
             await self._release(page.snapshot_id)
         return response
+
+    async def manifest(
+        self, parameters: Mapping[str, str] | Sequence[tuple[str, str]]
+    ) -> dict[str, Any]:
+        pairs = list(parameters.items()) if isinstance(parameters, Mapping) else list(parameters)
+        if (
+            len(pairs) != 1
+            or pairs[0][0] != "manifest_digest"
+            or re.fullmatch(r"[a-f0-9]{64}", pairs[0][1]) is None
+        ):
+            raise QueryError(
+                QueryErrorCode.INVALID_FILTER,
+                "exactly one lowercase manifest_digest is required",
+            )
+        if not isinstance(self._read_model, ManifestReader):
+            raise QueryError(QueryErrorCode.QUERY_UNAVAILABLE, "manifest storage is unavailable")
+        manifest_digest = pairs[0][1]
+        try:
+            effect = await self._read_model.read_manifest(manifest_digest=manifest_digest)
+        except Exception as error:
+            raise QueryError(
+                QueryErrorCode.QUERY_INTERNAL, "manifest query failed safely"
+            ) from error
+        if effect is None:
+            raise QueryError(QueryErrorCode.NOT_FOUND, "manifest was not found")
+        try:
+            canonical = effect.payload["canonical_projection"]
+            projection_digest = effect.payload["projection_digest"]
+            projection = json.loads(canonical)
+            valid = (
+                effect.kind == "delivery_manifest"
+                and effect.key == (manifest_digest,)
+                and isinstance(canonical, str)
+                and isinstance(projection_digest, str)
+                and sha256(canonical.encode()).hexdigest() == projection_digest
+                and json.dumps(
+                    projection, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ).encode()
+                == canonical.encode()
+                and isinstance(projection, dict)
+                and projection.get("manifest_digest") == manifest_digest
+            )
+            if not valid:
+                raise ValueError("stored Manifest projection integrity failure")
+        except Exception as error:
+            raise QueryError(
+                QueryErrorCode.QUERY_INTERNAL, "stored manifest is inconsistent"
+            ) from error
+        return {
+            "contract": {"name": "evidence.query", "revision": "1.0.0"},
+            "observation_profile": "2.0.0",
+            "read_model_revision": "2.0.0",
+            "manifest": projection,
+            "manifest_projection_digest": projection_digest,
+            "provenance": _task_provenance(effect, include_recorded_at=False),
+        }
 
     async def _release(self, snapshot_id: str) -> None:
         if isinstance(self._read_model, SnapshotReleaser):

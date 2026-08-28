@@ -236,6 +236,25 @@ class PostgresQueryReadModel:
             expired_at=row[7],
         )
 
+    async def read_manifest(self, *, manifest_digest: str) -> QueryEffect | None:
+        async with self._pool.connection() as connection, connection.cursor() as cursor:
+            await cursor.execute(
+                """
+                SELECT pe.effect_kind, pe.effect_key, pe.payload,
+                       pe.source_identity_kind, pe.source_identity_key, pe.recorded_at,
+                       ar.canonical_digest, ar.profile_version, ar.family_schema
+                FROM projection_effects pe
+                JOIN accepted_records ar
+                  ON ar.identity_kind = pe.source_identity_kind
+                 AND ar.identity_key = pe.source_identity_key
+                WHERE pe.effect_kind = 'delivery_manifest'
+                  AND pe.effect_key = %s
+                """,
+                (json.dumps((manifest_digest,), separators=(",", ":")),),
+            )
+            row = await cursor.fetchone()
+        return None if row is None else _query_effect(row)
+
     async def summarize_traces(self, *, snapshot_id: str) -> tuple[TraceSummary, ...]:
         lease = self._leases.get(snapshot_id)
         if lease is None:

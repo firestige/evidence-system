@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from typing import Any
 
 import psycopg
@@ -10,6 +11,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from wsr_evidence.admission.service import AdmissionService, Disposition
+from wsr_evidence.admission.validation import canonical_bytes
 from wsr_evidence.app import create_app
 from wsr_evidence.query.faults import SnapshotError, SnapshotFault
 from wsr_evidence.query.postgresql import PostgresQueryReadModel
@@ -79,11 +81,38 @@ def span_record(trace_id: str, *, delivery_id: str = "delivery-1") -> dict[str, 
 def task_binding_record(
     *, delivery_id: str, event_id: str, display_name: str | None = None
 ) -> dict[str, Any]:
+    del event_id
+    manifest_digest = sha256(delivery_id.encode()).hexdigest()
+    roles: list[dict[str, str]] = []
+    projection = canonical_bytes(
+        {
+            "schema_version": "execution.delivery-manifest-projection@1.0.0",
+            "delivery_id": delivery_id,
+            "task_id": "task-1",
+            "manifest_digest": manifest_digest,
+            "workflow": {
+                "package_name": "implementation",
+                "exact_package_version": "2.0.0",
+                "package_digest": f"sha256:{'b' * 64}",
+                "workflow_id": "workflow.implementation",
+                "workflow_version": "2.0.0",
+                "snapshot_id": "snapshot.implementation.2",
+                "snapshot_digest": f"sha256:{'c' * 64}",
+            },
+            "repository_model_bindings": {
+                "document_state": "ABSENT",
+                "resolved_map_digest": f"sha256:{sha256(canonical_bytes(roles)).hexdigest()}",
+            },
+            "roles": roles,
+        }
+    ).decode()
     attributes = {
         "agentops.delivery.id": delivery_id,
         "agentops.task.id": "task-1",
-        "agentops.manifest.digest": "d" * 64,
-        "agentops.event.id": event_id,
+        "agentops.manifest.digest": manifest_digest,
+        "agentops.event.id": f"task-binding-{sha256(delivery_id.encode()).hexdigest()[:24]}",
+        "agentops.delivery.manifest_projection": projection,
+        "agentops.delivery.manifest_projection_digest": sha256(projection.encode()).hexdigest(),
     }
     if display_name is not None:
         attributes["agentops.task.display_name"] = display_name
@@ -159,7 +188,11 @@ async def test_task_query_joins_name_provenance_and_applies_membership_cutoff() 
     try:
         assert (
             await admission.admit(
-                task_binding_record(delivery_id="delivery-1", event_id="task-event-1")
+                task_binding_record(
+                    delivery_id="delivery-1",
+                    event_id="task-event-1",
+                    display_name="Token tuning",
+                )
             )
         ).disposition is Disposition.ACCEPTED
         assert (
@@ -167,28 +200,41 @@ async def test_task_query_joins_name_provenance_and_applies_membership_cutoff() 
                 task_binding_record(
                     delivery_id="delivery-2",
                     event_id="task-event-2",
-                    display_name="Token tuning",
                 )
             )
         ).disposition is Disposition.ACCEPTED
         async with await psycopg.AsyncConnection.connect(database_url) as connection:
             await connection.execute(
                 "UPDATE projection_effects SET recorded_at = %s WHERE source_identity_key = %s",
-                (first_at, '["event","task-event-1"]'),
+                (
+                    first_at,
+                    f'["event","task-binding-{sha256(b"delivery-1").hexdigest()[:24]}"]',
+                ),
             )
             await connection.execute(
                 "UPDATE projection_effects SET recorded_at = %s WHERE source_identity_key = %s",
-                (second_at, '["event","task-event-2"]'),
+                (
+                    second_at,
+                    f'["event","task-binding-{sha256(b"delivery-2").hexdigest()[:24]}"]',
+                ),
             )
 
         listed = await QueryService(query_storage).tasks({})
         assert listed["items"][0]["display_name"] == "Token tuning"
-        assert listed["items"][0]["provenance"]["source"]["event_id"] == "task-event-2"
+        assert listed["items"][0]["provenance"]["source"]["event_id"] == (
+            f"task-binding-{sha256(b'delivery-1').hexdigest()[:24]}"
+        )
 
         membership = await QueryService(query_storage).tasks(
             {"task_id": "task-1", "as_of": "2026-08-26T01:30:00Z"}
         )
         assert [item["delivery_id"] for item in membership["items"]] == ["delivery-1"]
+
+        manifest_digest = sha256(b"delivery-1").hexdigest()
+        manifest = await QueryService(query_storage).manifest({"manifest_digest": manifest_digest})
+        assert manifest["manifest"]["delivery_id"] == "delivery-1"
+        assert manifest["manifest"]["manifest_digest"] == manifest_digest
+        assert "snapshot" not in manifest
     finally:
         await query_storage.close()
         await storage.close()
