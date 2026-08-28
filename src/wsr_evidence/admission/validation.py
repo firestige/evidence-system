@@ -12,11 +12,13 @@ from typing import Any, cast
 from wsr_evidence.model import ValidatedRecord
 
 PROFILE_VERSION = "1.0.0"
+TASK_PROFILE_VERSION = "2.0.0"
 SCOPE = {
     "name": "io.agentops.dsh.observation",
     "version": "1.0.0",
     "schema_url": "https://opentelemetry.io/schemas/1.41.0",
 }
+TASK_SCOPE = {**SCOPE, "version": TASK_PROFILE_VERSION}
 RESOURCE_FIELDS = {"service.name", "service.version"}
 EVENT_NAMES = {
     "delivery.summary",
@@ -121,6 +123,7 @@ COMMON_STRING_FIELDS = {
     "agentops.finding.target.artifact.id",
     "agentops.delivery.stage.reached",
     "agentops.model.id",
+    "agentops.task.display_name",
 }
 FAMILY_STRING_FIELDS = {
     "agentops.coverage.dimension",
@@ -173,6 +176,12 @@ def _set(value: str) -> set[str]:
 
 
 EVENT_RULES = {
+    "task.binding": (
+        _set(
+            "agentops.delivery.id agentops.task.id agentops.manifest.digest agentops.event.id agentops.task.display_name"
+        ),
+        _set("agentops.delivery.id agentops.task.id agentops.manifest.digest agentops.event.id"),
+    ),
     "delivery.summary": (
         _set(
             "agentops.workflow.family agentops.event.id agentops.delivery.outcome agentops.summary.state agentops.role.id agentops.family.schema agentops.delivery.elapsed_time_ms agentops.delivery.stage.reached"
@@ -326,14 +335,19 @@ def _require(condition: bool, message: str) -> None:
 
 def _validate_envelope(record: dict[str, Any]) -> None:
     _require(set(record) <= RECORD_KEYS, "unknown record field")
-    _require(record.get("profile_version") == PROFILE_VERSION, "unsupported profile version")
+    profile_version = record.get("profile_version")
+    _require(
+        profile_version in {PROFILE_VERSION, TASK_PROFILE_VERSION},
+        "unsupported profile version",
+    )
     resource = record.get("resource")
     _require(
         isinstance(resource, dict) and set(resource) == RESOURCE_FIELDS, "invalid Resource shape"
     )
     for value in cast(dict[str, Any], resource).values():
         _require(isinstance(value, str) and 1 <= len(value) <= 128, "invalid Resource value")
-    _require(record.get("scope") == SCOPE, "invalid Scope/profile pin")
+    expected_scope = TASK_SCOPE if profile_version == TASK_PROFILE_VERSION else SCOPE
+    _require(record.get("scope") == expected_scope, "invalid Scope/profile pin")
     _require(isinstance(record.get("attributes"), dict), "attributes must be an object")
 
 
@@ -345,12 +359,20 @@ def _validate_attributes(attributes: dict[str, Any]) -> None:
         if not name.startswith("agentops.") and field_type is None:
             raise ValidationError(f"unknown standard field {name}")
         if field_type == "string":
-            maximum = 512 if name == "agentops.finding.summary" else 128
+            maximum = (
+                512
+                if name == "agentops.finding.summary"
+                else 160
+                if name == "agentops.task.display_name"
+                else 128
+            )
             _require(
                 isinstance(value, str) and not isinstance(value, bool), f"wrong type for {name}"
             )
             _require(len(value) > 0, f"empty {name}")
             _require(len(value) <= maximum, f"over-limit {name}")
+            if name == "agentops.task.display_name":
+                _require(value.strip() == value, "invalid task display name")
         elif field_type == "integer":
             _require(
                 isinstance(value, int) and not isinstance(value, bool), f"wrong type for {name}"
@@ -511,7 +533,10 @@ def _validate_span(record: dict[str, Any], attributes: dict[str, Any]) -> None:
 
 def _validate_event(record: dict[str, Any], attributes: dict[str, Any]) -> None:
     event_name = record.get("event_name")
-    _require(event_name in EVENT_NAMES, "unknown EventName")
+    if record["profile_version"] == TASK_PROFILE_VERSION:
+        _require(event_name == "task.binding", "unknown EventName")
+    else:
+        _require(event_name in EVENT_NAMES, "unknown EventName")
     event_name = cast(str, event_name)
     span_fields = _set(
         "span_name span_kind start_time_unix_nano end_time_unix_nano parent_span_id trace_state span_flags span_links span_status"
@@ -539,7 +564,7 @@ def _validate_event(record: dict[str, Any], attributes: dict[str, Any]) -> None:
     _require(required <= set(attributes), f"incomplete closed field set for {event_name}")
     family = attributes.get("agentops.workflow.family")
     schema = attributes.get("agentops.family.schema")
-    if event_name != "sampling.decision":
+    if event_name not in {"sampling.decision", "task.binding"}:
         _require(
             (family, schema)
             in {("implementation", "implementation@1"), ("system-design", "system-design@1")},
@@ -665,6 +690,7 @@ def validate_record(logical: dict[str, Any]) -> ValidatedRecord:
         raise ValidationError("invalid record_type")
     return ValidatedRecord(
         logical=logical,
+        profile_version=logical["profile_version"],
         identity=identity,
         digest=canonical_digest(logical),
         attributes=attributes,

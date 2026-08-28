@@ -10,6 +10,8 @@ from wsr_evidence.model import ProjectionEffect, ValidatedRecord
 def project(record: ValidatedRecord) -> tuple[ProjectionEffect, ...]:
     if record.record_type == "span":
         return _project_span(record)
+    if record.event_name == "task.binding":
+        return _project_task_binding(record)
     if record.event_name == "review.finding":
         return _project_finding(record)
     if record.event_name == "role.lineage":
@@ -39,6 +41,36 @@ def project(record: ValidatedRecord) -> tuple[ProjectionEffect, ...]:
             },
         ),
     )
+
+
+def _project_task_binding(record: ValidatedRecord) -> tuple[ProjectionEffect, ...]:
+    attributes = record.attributes
+    task_id = attributes["agentops.task.id"]
+    delivery_id = attributes["agentops.delivery.id"]
+    manifest_digest = attributes["agentops.manifest.digest"]
+    effects = [
+        ProjectionEffect("task_declaration", (task_id,), {}),
+        ProjectionEffect(
+            "delivery_task_membership",
+            (task_id, delivery_id),
+            {"manifest_digest": manifest_digest},
+        ),
+        ProjectionEffect(
+            "delivery_task_guard",
+            (delivery_id,),
+            {"task_id": task_id, "manifest_digest": manifest_digest},
+        ),
+    ]
+    display_name = attributes.get("agentops.task.display_name")
+    if display_name is not None:
+        effects.append(
+            ProjectionEffect(
+                "task_display_name",
+                (task_id,),
+                {"display_name": display_name},
+            )
+        )
+    return tuple(effects)
 
 
 def _compatibility_coordinates(record: ValidatedRecord) -> tuple[Any, ...]:

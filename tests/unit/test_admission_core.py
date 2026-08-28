@@ -14,6 +14,7 @@ from wsr_evidence.admission.validation import (
     validate_record,
 )
 from wsr_evidence.projection.effects import ProjectionEffect
+from wsr_evidence.storage.postgresql import _accepted_record_values
 
 
 def finding_record(*, event_id: str = "event-1", target_id: str = "artifact-1") -> dict[str, Any]:
@@ -49,6 +50,29 @@ def finding_record(*, event_id: str = "event-1", target_id: str = "artifact-1") 
             "agentops.finding.target.kind": "ARTIFACT",
             "agentops.finding.target.id": target_id,
         },
+    }
+
+
+def task_binding_record(*, display_name: str | None = "Token tuning") -> dict[str, Any]:
+    attributes = {
+        "agentops.delivery.id": "delivery-1",
+        "agentops.task.id": "task-1",
+        "agentops.manifest.digest": "a" * 64,
+        "agentops.event.id": "task-binding-delivery-1",
+    }
+    if display_name is not None:
+        attributes["agentops.task.display_name"] = display_name
+    return {
+        "profile_version": "2.0.0",
+        "record_type": "event",
+        "event_name": "task.binding",
+        "resource": {"service.name": "execution", "service.version": "0.1.3"},
+        "scope": {
+            "name": "io.agentops.dsh.observation",
+            "version": "2.0.0",
+            "schema_url": "https://opentelemetry.io/schemas/1.41.0",
+        },
+        "attributes": attributes,
     }
 
 
@@ -97,6 +121,56 @@ def test_exact_profile_rejects_unknown_and_sibling_family_fields() -> None:
     sibling["attributes"]["agentops.verification.id"] = "verification-1"
     with pytest.raises(ValidationError, match="prohibited on review.finding"):
         validate_record(sibling)
+
+
+def test_profile_two_accepts_only_the_closed_task_binding_carrier() -> None:
+    validated = validate_record(task_binding_record())
+
+    assert validated.profile_version == "2.0.0"
+    assert validated.identity == ("event", "task-binding-delivery-1")
+
+    disguised = task_binding_record()
+    disguised["profile_version"] = "1.0.0"
+    disguised["scope"]["version"] = "1.0.0"
+    with pytest.raises(ValidationError, match="unknown EventName"):
+        validate_record(disguised)
+
+    whitespace = task_binding_record(display_name=" padded ")
+    with pytest.raises(ValidationError, match="task display name"):
+        validate_record(whitespace)
+
+
+def test_task_binding_projects_atomic_identity_membership_guard_and_optional_name() -> None:
+    named = AdmissionService.project(validate_record(task_binding_record()))
+    unnamed = AdmissionService.project(validate_record(task_binding_record(display_name=None)))
+
+    assert [(effect.kind, effect.key, effect.payload) for effect in named] == [
+        ("task_declaration", ("task-1",), {}),
+        (
+            "delivery_task_membership",
+            ("task-1", "delivery-1"),
+            {"manifest_digest": "a" * 64},
+        ),
+        (
+            "delivery_task_guard",
+            ("delivery-1",),
+            {"task_id": "task-1", "manifest_digest": "a" * 64},
+        ),
+        ("task_display_name", ("task-1",), {"display_name": "Token tuning"}),
+    ]
+    assert [effect.kind for effect in unnamed] == [
+        "task_declaration",
+        "delivery_task_membership",
+        "delivery_task_guard",
+    ]
+
+
+def test_task_binding_persists_its_exact_profile_coordinate() -> None:
+    record = validate_record(task_binding_record())
+
+    values = _accepted_record_values(record)
+
+    assert values[3] == "2.0.0"
 
 
 def test_family_specific_summary_and_fresh_reader_shapes_are_closed() -> None:

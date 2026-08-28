@@ -24,6 +24,17 @@ def _key_json(key: tuple[Any, ...]) -> str:
     return json.dumps(key, ensure_ascii=False, separators=(",", ":"))
 
 
+def _accepted_record_values(record: ValidatedRecord) -> tuple[Any, ...]:
+    return (
+        record.identity[0],
+        _key_json(record.identity),
+        record.digest,
+        record.profile_version,
+        record.attributes.get("agentops.family.schema"),
+        json.dumps(record.logical, ensure_ascii=False, separators=(",", ":")),
+    )
+
+
 class PostgresTransaction:
     def __init__(self, connection: AsyncConnection[Any]) -> None:
         self._connection = connection
@@ -41,14 +52,7 @@ class PostgresTransaction:
                 ON CONFLICT (identity_kind, identity_key) DO NOTHING
                 RETURNING canonical_digest
                 """,
-                (
-                    record.identity[0],
-                    identity_key,
-                    record.digest,
-                    "1.0.0",
-                    record.attributes.get("agentops.family.schema"),
-                    json.dumps(record.logical, ensure_ascii=False, separators=(",", ":")),
-                ),
+                _accepted_record_values(record),
             )
             inserted = await cursor.fetchone()
             if inserted is not None:

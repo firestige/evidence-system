@@ -15,6 +15,7 @@ class Disposition(StrEnum):
 @dataclass(frozen=True, slots=True)
 class ValidatedRecord:
     logical: dict[str, Any]
+    profile_version: str
     identity: tuple[str, ...]
     digest: str
     attributes: dict[str, str | int | float]
