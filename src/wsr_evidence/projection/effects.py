@@ -70,6 +70,16 @@ def _project_task_binding(record: ValidatedRecord) -> tuple[ProjectionEffect, ..
                 {"display_name": display_name},
             )
         )
+    effects.append(
+        ProjectionEffect(
+            "delivery_manifest",
+            (manifest_digest,),
+            {
+                "canonical_projection": attributes["agentops.delivery.manifest_projection"],
+                "projection_digest": attributes["agentops.delivery.manifest_projection_digest"],
+            },
+        )
+    )
     return tuple(effects)
 
 

@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import os
 from copy import deepcopy
+from hashlib import sha256
 from typing import Any
 
 import psycopg
 import pytest
 
 from wsr_evidence.admission.service import AdmissionService, Disposition
+from wsr_evidence.admission.validation import canonical_bytes
 from wsr_evidence.storage.postgresql import PostgresStorage
 from wsr_evidence.storage.read_model import CORE_READ_MODEL_VERSION
 
@@ -52,11 +54,38 @@ def finding_record(*, event_id: str, target_id: str = "artifact-1") -> dict[str,
 def task_binding_record(
     *, task_id: str, delivery_id: str, event_id: str, display_name: str | None
 ) -> dict[str, Any]:
+    del event_id
+    manifest_digest = sha256(f"{delivery_id}:{task_id}".encode()).hexdigest()
+    roles: list[dict[str, str]] = []
+    projection = canonical_bytes(
+        {
+            "schema_version": "execution.delivery-manifest-projection@1.0.0",
+            "delivery_id": delivery_id,
+            "task_id": task_id,
+            "manifest_digest": manifest_digest,
+            "workflow": {
+                "package_name": "implementation",
+                "exact_package_version": "2.0.0",
+                "package_digest": f"sha256:{'b' * 64}",
+                "workflow_id": "workflow.implementation",
+                "workflow_version": "2.0.0",
+                "snapshot_id": "snapshot.implementation.2",
+                "snapshot_digest": f"sha256:{'c' * 64}",
+            },
+            "repository_model_bindings": {
+                "document_state": "ABSENT",
+                "resolved_map_digest": f"sha256:{sha256(canonical_bytes(roles)).hexdigest()}",
+            },
+            "roles": roles,
+        }
+    ).decode()
     attributes = {
         "agentops.delivery.id": delivery_id,
         "agentops.task.id": task_id,
-        "agentops.manifest.digest": "a" * 64,
-        "agentops.event.id": event_id,
+        "agentops.manifest.digest": manifest_digest,
+        "agentops.event.id": f"task-binding-{sha256(delivery_id.encode()).hexdigest()[:24]}",
+        "agentops.delivery.manifest_projection": projection,
+        "agentops.delivery.manifest_projection_digest": sha256(projection.encode()).hexdigest(),
     }
     if display_name is not None:
         attributes["agentops.task.display_name"] = display_name
@@ -262,7 +291,7 @@ async def test_task_guard_and_display_conflicts_rollback_the_whole_record() -> N
         assert (await service.admit(rebound)).disposition is Disposition.CONFLICT
         assert (await service.admit(renamed)).disposition is Disposition.CONFLICT
         assert await table_count(database_url, "accepted_records") == 1
-        assert await table_count(database_url, "projection_effects") == 4
+        assert await table_count(database_url, "projection_effects") == 5
     finally:
         await storage.close()
 

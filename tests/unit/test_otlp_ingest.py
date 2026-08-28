@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import deepcopy
+from hashlib import sha256
 from typing import Any
 
 import pytest
@@ -18,7 +19,7 @@ from opentelemetry.proto.resource.v1.resource_pb2 import Resource
 from opentelemetry.proto.trace.v1.trace_pb2 import ResourceSpans, ScopeSpans, Span, Status
 
 from wsr_evidence.admission.service import AdmissionService, Disposition
-from wsr_evidence.admission.validation import ValidationError, validate_record
+from wsr_evidence.admission.validation import ValidationError, canonical_bytes, validate_record
 from wsr_evidence.app import create_app
 from wsr_evidence.model import ProjectionEffect
 from wsr_evidence.transport.otlp import OtlpIngestor, decode_logs_request, decode_traces_request
@@ -68,14 +69,45 @@ def sampling_record(event_id: str, *, unknown: bool = False) -> LogRecord:
 
 
 def task_binding_log() -> LogRecord:
+    roles: list[dict[str, str]] = []
+    projection = canonical_bytes(
+        {
+            "schema_version": "execution.delivery-manifest-projection@1.0.0",
+            "delivery_id": "delivery-1",
+            "task_id": "task-1",
+            "manifest_digest": "a" * 64,
+            "workflow": {
+                "package_name": "implementation",
+                "exact_package_version": "2.0.0",
+                "package_digest": f"sha256:{'b' * 64}",
+                "workflow_id": "workflow.implementation",
+                "workflow_version": "2.0.0",
+                "snapshot_id": "snapshot.implementation.2",
+                "snapshot_digest": f"sha256:{'c' * 64}",
+            },
+            "repository_model_bindings": {
+                "document_state": "ABSENT",
+                "resolved_map_digest": f"sha256:{sha256(canonical_bytes(roles)).hexdigest()}",
+            },
+            "roles": roles,
+        }
+    ).decode()
     return LogRecord(
         event_name="task.binding",
         attributes=[
             _kv("agentops.delivery.id", "delivery-1"),
             _kv("agentops.task.id", "task-1"),
             _kv("agentops.manifest.digest", "a" * 64),
-            _kv("agentops.event.id", "task-binding-delivery-1"),
+            _kv(
+                "agentops.event.id",
+                f"task-binding-{sha256(b'delivery-1').hexdigest()[:24]}",
+            ),
             _kv("agentops.task.display_name", "Token tuning"),
+            _kv("agentops.delivery.manifest_projection", projection),
+            _kv(
+                "agentops.delivery.manifest_projection_digest",
+                sha256(projection.encode()).hexdigest(),
+            ),
         ],
     )
 
@@ -214,6 +246,7 @@ async def test_profile_two_task_protobuf_projects_the_exact_authority_slice() ->
         "delivery_task_membership",
         "delivery_task_guard",
         "task_display_name",
+        "delivery_manifest",
     ]
 
 
