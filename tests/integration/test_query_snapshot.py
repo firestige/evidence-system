@@ -45,6 +45,30 @@ def sampling_record(event_id: str) -> dict[str, Any]:
     }
 
 
+def delivery_summary_record(
+    event_id: str, *, trace_id: str | None = None, span_id: str | None = None
+) -> dict[str, Any]:
+    return {
+        "profile_version": "1.0.0",
+        "record_type": "event",
+        "event_name": "delivery.summary",
+        **({"trace_id": trace_id, "span_id": span_id} if trace_id and span_id else {}),
+        "resource": {"service.name": "dsh", "service.version": "1"},
+        "scope": {
+            "name": "io.agentops.dsh.observation",
+            "version": "1.0.0",
+            "schema_url": "https://opentelemetry.io/schemas/1.41.0",
+        },
+        "attributes": {
+            "agentops.event.id": event_id,
+            "agentops.workflow.family": "implementation",
+            "agentops.delivery.outcome": "COMPLETED",
+            "agentops.summary.state": "FINAL",
+            "agentops.family.schema": "implementation@1",
+        },
+    }
+
+
 def span_record(trace_id: str, *, delivery_id: str = "delivery-1") -> dict[str, Any]:
     span_id = "a" * 16
     return {
@@ -315,6 +339,77 @@ async def test_raw_debug_scrub_does_not_change_projection_filters() -> None:
 
         traces = await service.traces({"delivery_id": "delivery-1", "limit": "10"})
         assert [item["kind"] for item in traces["items"]] == ["NODE", "PARENT_EDGE", "LINK"]
+    finally:
+        await query_storage.close()
+        await storage.close()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_correlated_event_facts_are_selected_by_exact_trace_and_delivery() -> None:
+    database_url = os.environ.get("WSR_EVIDENCE_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("WSR_EVIDENCE_DATABASE_URL is not configured")
+    await clear_core(database_url)
+    storage = await PostgresStorage.open(database_url)
+    query_storage = PostgresQueryReadModel.from_storage(storage)
+    maintenance = PostgresRetentionMaintenance.from_storage(storage)
+    admission = AdmissionService(storage)
+    trace_id = "0" * 31 + "1"
+    span_id = "a" * 16
+    now = datetime(2026, 8, 26, 12, tzinfo=UTC)
+    try:
+        assert (await admission.admit(span_record(trace_id))).disposition is Disposition.ACCEPTED
+        assert (
+            await admission.admit(
+                delivery_summary_record("summary-correlated", trace_id=trace_id, span_id=span_id)
+            )
+        ).disposition is Disposition.ACCEPTED
+        assert (
+            await admission.admit(delivery_summary_record("summary-uncorrelated"))
+        ).disposition is Disposition.ACCEPTED
+
+        service = QueryService(query_storage)
+        by_trace = await service.facts({"trace_id": trace_id, "limit": "10"})
+        by_delivery = await service.facts({"delivery_id": "delivery-1", "limit": "10"})
+
+        for response in (by_trace, by_delivery):
+            event_ids = {
+                item["source"]["event_id"]
+                for item in response["items"]
+                if item["source"]["kind"] == "EVENT"
+            }
+            assert event_ids == {"summary-correlated"}
+
+        async with await psycopg.AsyncConnection.connect(database_url) as connection:
+            await connection.execute(
+                "UPDATE projection_effects SET recorded_at = %s",
+                (datetime(2025, 1, 1, tzinfo=UTC),),
+            )
+        factual = await maintenance.plan_expiry(
+            resource_class=ResourceClass.FACTUAL_PROJECTION,
+            policy_revision="1.0.0",
+            cutoff=now,
+            ttl_seconds=0,
+            limit=20,
+        )
+        await maintenance.apply_expiry(batch=factual, clock_now=now)
+
+        after_expiry = await QueryService(query_storage).facts(
+            {"delivery_id": "delivery-1", "limit": "10"}
+        )
+        expired_event_ids = {
+            item["source"]["event_id"]
+            for item in after_expiry["items"]
+            if item["source"]["kind"] == "EVENT"
+        }
+        assert expired_event_ids == {"summary-correlated"}
+        assert (
+            next(item for item in after_expiry["items"] if item["source"]["kind"] == "EVENT")[
+                "truth"
+            ]["expiry"]
+            == "EXPIRED"
+        )
     finally:
         await query_storage.close()
         await storage.close()

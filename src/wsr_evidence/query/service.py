@@ -649,7 +649,7 @@ def _projected_attributes(effect: QueryEffect) -> dict[str, Any]:
         attributes = effect.payload.get("attributes")
         return cast(dict[str, Any], attributes) if isinstance(attributes, dict) else {}
     if effect.kind in {"finding_assertion", "role_lineage"}:
-        return dict(effect.payload)
+        return {name: value for name, value in effect.payload.items() if name != "_otel_context"}
     if effect.kind == "finding_target":
         attributes = {
             "agentops.finding.id": effect.key[0],
@@ -838,7 +838,7 @@ def _expired_compatibility(expiry: ExpiryRecord) -> dict[str, Any]:
     dimensions = [
         {"field": field, "value": value}
         for field, value in expiry.compatibility
-        if field not in {"family_schema", "event_name", "completeness", "delivery_id"}
+        if field not in {"family_schema", "event_name", "completeness", "delivery_id", "trace_id"}
     ]
     return {
         "family_schema": values.get("family_schema"),

@@ -471,14 +471,23 @@ class PostgresQueryReadModel:
             clauses.append("ar.family_schema = %s")
             parameters.append(value)
         elif name == "trace_id":
-            clauses.append(
-                "pe.effect_key::jsonb ->> 0 = %s"
-                if query == "TRACES"
-                else (
-                    "pe.source_identity_kind = 'span' AND pe.source_identity_key::jsonb ->> 1 = %s"
+            if query == "TRACES":
+                clauses.append("pe.effect_key::jsonb ->> 0 = %s")
+                parameters.append(value)
+            else:
+                clauses.append(
+                    "((pe.source_identity_kind = 'span' "
+                    "AND pe.source_identity_key::jsonb ->> 1 = %s) OR "
+                    "(pe.source_identity_kind = 'event' "
+                    "AND (pe.payload #>> '{_otel_context,trace_id}' = %s OR EXISTS ("
+                    "SELECT 1 FROM retention_expiry_markers marker "
+                    "WHERE marker.resource_class = 'FACTUAL_PROJECTION' "
+                    "AND marker.owner_key = pe.effect_key "
+                    "AND marker.resource_kind = "
+                    + FACT_KIND_SQL
+                    + " AND marker.compatibility @> %s::jsonb))))"
                 )
-            )
-            parameters.append(value)
+                parameters.extend((value, value, json.dumps([["trace_id", value]])))
         elif name == "delivery_id":
             if query == "TRACES":
                 clauses.append(
@@ -501,13 +510,26 @@ class PostgresQueryReadModel:
                 parameters.extend((value, json.dumps([["delivery_id", value]])))
             else:
                 clauses.append(
-                    "pe.effect_kind = 'delivery_root_binding' AND "
-                    "(pe.payload ->> 'delivery_id' = %s OR EXISTS ("
+                    "COALESCE("
+                    "CASE WHEN pe.source_identity_kind = 'span' "
+                    "THEN pe.source_identity_key::jsonb ->> 1 END, "
+                    "pe.payload #>> '{_otel_context,trace_id}', "
+                    "(SELECT pair ->> 1 FROM retention_expiry_markers event_marker, "
+                    "jsonb_array_elements(event_marker.compatibility) pair "
+                    "WHERE event_marker.resource_class = 'FACTUAL_PROJECTION' "
+                    "AND event_marker.owner_key = pe.effect_key "
+                    "AND event_marker.resource_kind = "
+                    + FACT_KIND_SQL
+                    + " AND pair ->> 0 = 'trace_id')) IN ("
+                    "SELECT root.effect_key::jsonb ->> 0 "
+                    "FROM projection_effects root "
+                    "WHERE root.effect_kind = 'delivery_root_binding' "
+                    "AND (root.payload ->> 'delivery_id' = %s OR EXISTS ("
                     "SELECT 1 FROM retention_expiry_markers marker "
                     "WHERE marker.resource_class = 'FACTUAL_PROJECTION' "
-                    "AND marker.owner_key = pe.effect_key "
+                    "AND marker.owner_key = root.effect_key "
                     "AND marker.resource_kind = 'DELIVERY_ROOT_BINDING' "
-                    "AND marker.compatibility @> %s::jsonb))"
+                    "AND marker.compatibility @> %s::jsonb)))"
                 )
                 parameters.extend((value, json.dumps([["delivery_id", value]])))
         elif name in {"recorded_from", "recorded_to"}:

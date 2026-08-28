@@ -104,6 +104,9 @@ def _projection_compatibility(
         )
     if effect_kind == "delivery_root_binding":
         compatibility.append(["delivery_id", payload["delivery_id"]])
+    context = payload.get("_otel_context")
+    if isinstance(context, dict) and isinstance(context.get("trace_id"), str):
+        compatibility.append(["trace_id", context["trace_id"]])
     return compatibility
 
 

@@ -280,7 +280,7 @@ def _validate_compatibility(record: ExpiryRecord) -> None:
         if pairs:
             raise ValueError("Raw and Trace expiry compatibility must be empty")
         return
-    if not 3 <= len(pairs) <= 7 or tuple(key for key, _ in pairs[:3]) != (
+    if not 3 <= len(pairs) <= 8 or tuple(key for key, _ in pairs[:3]) != (
         "family_schema",
         "event_name",
         "completeness",
@@ -305,6 +305,16 @@ def _validate_compatibility(record: ExpiryRecord) -> None:
         allowed_suffix = ("gen_ai.provider.name", "C57", "C30", "C06")
     elif record.resource_kind == "DELIVERY_ROOT_BINDING":
         allowed_suffix = ("delivery_id",)
+    if record.resource_kind in {
+        "EVENT_CONTRIBUTION",
+        "FINDING_ASSERTION",
+        "FINDING_TARGET",
+        "FINDING_STATUS",
+        "FINDING_FIX",
+        "FINDING_RECHECK",
+        "ROLE_LINEAGE",
+    }:
+        allowed_suffix = (*allowed_suffix, "trace_id")
     suffix = keys[3:]
     positions = [allowed_suffix.index(key) for key in suffix if key in allowed_suffix]
     if len(positions) != len(suffix) or positions != sorted(positions):

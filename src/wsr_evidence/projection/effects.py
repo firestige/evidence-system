@@ -13,33 +13,71 @@ def project(record: ValidatedRecord) -> tuple[ProjectionEffect, ...]:
     if record.event_name == "task.binding":
         return _project_task_binding(record)
     if record.event_name == "review.finding":
-        return _project_finding(record)
+        return _bind_event_context(record, _project_finding(record))
     if record.event_name == "role.lineage":
         attributes = record.attributes
-        return (
-            ProjectionEffect(
-                "role_lineage",
-                (
-                    attributes["agentops.family.schema"],
-                    attributes["agentops.role.id"],
+        return _bind_event_context(
+            record,
+            (
+                ProjectionEffect(
+                    "role_lineage",
+                    (
+                        attributes["agentops.family.schema"],
+                        attributes["agentops.role.id"],
+                    ),
+                    dict(attributes),
                 ),
-                dict(attributes),
             ),
         )
     attributes = record.attributes
     compatibility = _compatibility_coordinates(record)
     completeness = attributes.get("agentops.summary.state")
-    return (
-        ProjectionEffect(
-            "factual_contribution",
-            (record.event_name, attributes["agentops.event.id"]),
-            {
-                "attributes": dict(attributes),
-                "compatibility_key": compatibility,
-                "aggregate_eligible": completeness in {"FINAL", "LOWER_BOUND"}
-                and all(value is not None for value in compatibility),
-            },
+    return _bind_event_context(
+        record,
+        (
+            ProjectionEffect(
+                "factual_contribution",
+                (record.event_name, attributes["agentops.event.id"]),
+                {
+                    "attributes": dict(attributes),
+                    "compatibility_key": compatibility,
+                    "aggregate_eligible": completeness in {"FINAL", "LOWER_BOUND"}
+                    and all(value is not None for value in compatibility),
+                },
+            ),
         ),
+    )
+
+
+def _bind_event_context(
+    record: ValidatedRecord, effects: tuple[ProjectionEffect, ...]
+) -> tuple[ProjectionEffect, ...]:
+    trace_id = record.logical.get("trace_id")
+    span_id = record.logical.get("span_id")
+    if not isinstance(trace_id, str) or not isinstance(span_id, str):
+        return effects
+    public_fact_kinds = {
+        "factual_contribution",
+        "finding_assertion",
+        "finding_target",
+        "finding_status",
+        "finding_fix",
+        "finding_recheck",
+        "role_lineage",
+    }
+    return tuple(
+        ProjectionEffect(
+            effect.kind,
+            effect.key,
+            {
+                **effect.payload,
+                "_otel_context": {"trace_id": trace_id, "span_id": span_id},
+            },
+            effect.operation,
+        )
+        if effect.kind in public_fact_kinds
+        else effect
+        for effect in effects
     )
 
 
