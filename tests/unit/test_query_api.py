@@ -238,6 +238,13 @@ async def test_task_membership_requires_exact_task_and_normalized_as_of() -> Non
             await QueryService(read_model).tasks(parameters)
         assert caught.value.code is QueryErrorCode.INVALID_FILTER
 
+    for invalid_task_id in ("a" * 129, " task-a", "task?a"):
+        with pytest.raises(QueryError) as caught:
+            await QueryService(read_model).tasks(
+                {"task_id": invalid_task_id, "as_of": "2026-08-26T01:02:04Z"}
+            )
+        assert caught.value.code is QueryErrorCode.INVALID_FILTER
+
 
 @pytest.mark.asyncio
 async def test_http_task_query_is_read_only_and_rejects_repeated_filters() -> None:

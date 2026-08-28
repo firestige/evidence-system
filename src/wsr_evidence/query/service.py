@@ -418,8 +418,10 @@ def _validate_filter_values(values: Mapping[str, str], *, route: str) -> None:
         raise QueryError(QueryErrorCode.INVALID_FILTER, "trace_id must be 32 lower-case hex")
     if route == "TASKS":
         task_id = values.get("task_id")
-        if task_id is not None and len(task_id.encode()) > 256:
-            raise QueryError(QueryErrorCode.INVALID_FILTER, "task_id is too long")
+        if task_id is not None and (
+            len(task_id) > 128 or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/@-]*", task_id) is None
+        ):
+            raise QueryError(QueryErrorCode.INVALID_FILTER, "task_id is invalid")
         if "as_of" in values:
             _parse_utc(values["as_of"])
 
