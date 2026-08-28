@@ -256,12 +256,13 @@ def _check_record_count(records: list[dict[str, Any]]) -> None:
 
 
 def _homogeneous(records: list[dict[str, Any]]) -> bool:
+    profiles = {record["profile_version"] for record in records}
     schemas = {
         record["attributes"].get("agentops.family.schema")
         for record in records
         if record["attributes"].get("agentops.family.schema") is not None
     }
-    return len(schemas) <= 1
+    return len(profiles) <= 1 and len(schemas) <= 1
 
 
 def _within_cardinality_budget(records: list[dict[str, Any]]) -> bool:

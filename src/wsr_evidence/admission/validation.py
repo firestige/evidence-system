@@ -12,11 +12,13 @@ from typing import Any, cast
 from wsr_evidence.model import ValidatedRecord
 
 PROFILE_VERSION = "1.0.0"
+TASK_PROFILE_VERSION = "2.0.0"
 SCOPE = {
     "name": "io.agentops.dsh.observation",
     "version": "1.0.0",
     "schema_url": "https://opentelemetry.io/schemas/1.41.0",
 }
+TASK_SCOPE = {**SCOPE, "version": TASK_PROFILE_VERSION}
 RESOURCE_FIELDS = {"service.name", "service.version"}
 EVENT_NAMES = {
     "delivery.summary",
@@ -121,6 +123,9 @@ COMMON_STRING_FIELDS = {
     "agentops.finding.target.artifact.id",
     "agentops.delivery.stage.reached",
     "agentops.model.id",
+    "agentops.task.display_name",
+    "agentops.delivery.manifest_projection",
+    "agentops.delivery.manifest_projection_digest",
 }
 FAMILY_STRING_FIELDS = {
     "agentops.coverage.dimension",
@@ -173,6 +178,14 @@ def _set(value: str) -> set[str]:
 
 
 EVENT_RULES = {
+    "task.binding": (
+        _set(
+            "agentops.delivery.id agentops.task.id agentops.manifest.digest agentops.event.id agentops.task.display_name agentops.delivery.manifest_projection agentops.delivery.manifest_projection_digest"
+        ),
+        _set(
+            "agentops.delivery.id agentops.task.id agentops.manifest.digest agentops.event.id agentops.delivery.manifest_projection agentops.delivery.manifest_projection_digest"
+        ),
+    ),
     "delivery.summary": (
         _set(
             "agentops.workflow.family agentops.event.id agentops.delivery.outcome agentops.summary.state agentops.role.id agentops.family.schema agentops.delivery.elapsed_time_ms agentops.delivery.stage.reached"
@@ -261,6 +274,9 @@ DIGEST = re.compile(r"^[a-f0-9]{64}$")
 TRACE_ID = re.compile(r"^[a-f0-9]{32}$")
 SPAN_ID = re.compile(r"^[a-f0-9]{16}$")
 NANOSECONDS = re.compile(r"^(0|[1-9][0-9]{0,19})$")
+PREFIXED_DIGEST = re.compile(r"^sha256:[a-f0-9]{64}$")
+PACKAGE_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
+VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 
 
 class ValidationError(ValueError):
@@ -326,14 +342,19 @@ def _require(condition: bool, message: str) -> None:
 
 def _validate_envelope(record: dict[str, Any]) -> None:
     _require(set(record) <= RECORD_KEYS, "unknown record field")
-    _require(record.get("profile_version") == PROFILE_VERSION, "unsupported profile version")
+    profile_version = record.get("profile_version")
+    _require(
+        profile_version in {PROFILE_VERSION, TASK_PROFILE_VERSION},
+        "unsupported profile version",
+    )
     resource = record.get("resource")
     _require(
         isinstance(resource, dict) and set(resource) == RESOURCE_FIELDS, "invalid Resource shape"
     )
     for value in cast(dict[str, Any], resource).values():
         _require(isinstance(value, str) and 1 <= len(value) <= 128, "invalid Resource value")
-    _require(record.get("scope") == SCOPE, "invalid Scope/profile pin")
+    expected_scope = TASK_SCOPE if profile_version == TASK_PROFILE_VERSION else SCOPE
+    _require(record.get("scope") == expected_scope, "invalid Scope/profile pin")
     _require(isinstance(record.get("attributes"), dict), "attributes must be an object")
 
 
@@ -345,12 +366,27 @@ def _validate_attributes(attributes: dict[str, Any]) -> None:
         if not name.startswith("agentops.") and field_type is None:
             raise ValidationError(f"unknown standard field {name}")
         if field_type == "string":
-            maximum = 512 if name == "agentops.finding.summary" else 128
+            maximum = (
+                65_536
+                if name == "agentops.delivery.manifest_projection"
+                else 512
+                if name == "agentops.finding.summary"
+                else 160
+                if name == "agentops.task.display_name"
+                else 128
+            )
             _require(
                 isinstance(value, str) and not isinstance(value, bool), f"wrong type for {name}"
             )
             _require(len(value) > 0, f"empty {name}")
-            _require(len(value) <= maximum, f"over-limit {name}")
+            length = (
+                len(value.encode())
+                if name == "agentops.delivery.manifest_projection"
+                else len(value)
+            )
+            _require(length <= maximum, f"over-limit {name}")
+            if name == "agentops.task.display_name":
+                _require(value.strip() == value, "invalid task display name")
         elif field_type == "integer":
             _require(
                 isinstance(value, int) and not isinstance(value, bool), f"wrong type for {name}"
@@ -364,11 +400,178 @@ def _validate_attributes(attributes: dict[str, Any]) -> None:
             _require(math.isfinite(value), f"non-finite {name}")
         if name in ENUMS:
             _require(value in ENUMS[name], f"invalid enum for {name}")
-        if name in {"agentops.manifest.digest", "agentops.artifact.digest"}:
+        if name in {
+            "agentops.manifest.digest",
+            "agentops.artifact.digest",
+            "agentops.delivery.manifest_projection_digest",
+        }:
             _require(
                 isinstance(value, str) and DIGEST.fullmatch(value) is not None,
                 f"invalid digest {name}",
             )
+
+
+def _closed_object(value: Any, keys: set[str], message: str) -> dict[str, Any]:
+    _require(isinstance(value, dict) and set(value) == keys, message)
+    return cast(dict[str, Any], value)
+
+
+def _parse_closed_manifest_projection(attributes: dict[str, Any]) -> dict[str, Any]:
+    encoded = cast(str, attributes["agentops.delivery.manifest_projection"])
+
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            _require(key not in result, "duplicate Manifest projection member")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(encoded, object_pairs_hook=reject_duplicates)
+    except (json.JSONDecodeError, UnicodeError) as error:
+        raise ValidationError("invalid Manifest projection JSON") from error
+    _require(canonical_bytes(value) == encoded.encode(), "Manifest projection is not canonical")
+    _require(
+        sha256(encoded.encode()).hexdigest()
+        == attributes["agentops.delivery.manifest_projection_digest"],
+        "Manifest projection digest mismatch",
+    )
+    projection = _closed_object(
+        value,
+        {
+            "schema_version",
+            "delivery_id",
+            "task_id",
+            "manifest_digest",
+            "workflow",
+            "repository_model_bindings",
+            "roles",
+        },
+        "invalid Manifest projection shape",
+    )
+    _require(
+        projection["schema_version"] == "execution.delivery-manifest-projection@1.0.0",
+        "invalid Manifest projection schema",
+    )
+    for projection_name, attribute_name in (
+        ("delivery_id", "agentops.delivery.id"),
+        ("task_id", "agentops.task.id"),
+        ("manifest_digest", "agentops.manifest.digest"),
+    ):
+        _require(
+            projection[projection_name] == attributes[attribute_name],
+            "Manifest projection identity mismatch",
+        )
+    workflow = _closed_object(
+        projection["workflow"],
+        {
+            "package_name",
+            "exact_package_version",
+            "package_digest",
+            "workflow_id",
+            "workflow_version",
+            "snapshot_id",
+            "snapshot_digest",
+        },
+        "invalid Manifest Workflow shape",
+    )
+    _require(
+        isinstance(workflow["package_name"], str)
+        and PACKAGE_NAME.fullmatch(workflow["package_name"]) is not None,
+        "invalid Manifest Package name",
+    )
+    for name in ("exact_package_version", "workflow_version"):
+        _require(
+            isinstance(workflow[name], str) and VERSION.fullmatch(workflow[name]) is not None,
+            "invalid Manifest version",
+        )
+    for name in ("package_digest", "snapshot_digest"):
+        _require(
+            isinstance(workflow[name], str)
+            and PREFIXED_DIGEST.fullmatch(workflow[name]) is not None,
+            "invalid Manifest digest",
+        )
+    for name in ("workflow_id", "snapshot_id"):
+        _require(
+            isinstance(workflow[name], str) and IDENTIFIER.fullmatch(workflow[name]) is not None,
+            "invalid Manifest identity",
+        )
+
+    repository = projection["repository_model_bindings"]
+    _require(isinstance(repository, dict), "invalid repository binding shape")
+    state = repository.get("document_state")
+    expected_repository_keys = (
+        {"document_state", "resolved_map_digest"}
+        if state == "ABSENT"
+        else {"document_state", "document_digest", "resolved_map_digest"}
+    )
+    repository = _closed_object(
+        repository, expected_repository_keys, "invalid repository binding shape"
+    )
+    _require(state in {"ABSENT", "PRESENT"}, "invalid repository document state")
+    for name in (
+        {"resolved_map_digest"} if state == "ABSENT" else {"document_digest", "resolved_map_digest"}
+    ):
+        _require(
+            isinstance(repository[name], str)
+            and PREFIXED_DIGEST.fullmatch(repository[name]) is not None,
+            "invalid repository binding digest",
+        )
+
+    roles = projection["roles"]
+    _require(isinstance(roles, list) and len(roles) <= 128, "invalid Manifest Role collection")
+    role_keys = {
+        "role_id",
+        "role_prompt_identity",
+        "role_prompt_digest",
+        "agent_provider_id",
+        "model_provider_id",
+        "model_id",
+        "resolution_source",
+    }
+    previous: str | None = None
+    resolved_roles: list[dict[str, str]] = []
+    for value_role in roles:
+        role = _closed_object(value_role, role_keys, "invalid Manifest Role shape")
+        for name in (
+            "role_id",
+            "role_prompt_identity",
+            "agent_provider_id",
+            "model_provider_id",
+            "model_id",
+        ):
+            _require(
+                isinstance(role[name], str) and IDENTIFIER.fullmatch(role[name]) is not None,
+                "invalid Manifest Role identity",
+            )
+        _require(
+            isinstance(role["role_prompt_digest"], str)
+            and PREFIXED_DIGEST.fullmatch(role["role_prompt_digest"]) is not None,
+            "invalid Role prompt digest",
+        )
+        _require(
+            role["resolution_source"] in {"REPOSITORY", "EXECUTION_DEFAULT"},
+            "invalid Role resolution source",
+        )
+        role_id = cast(str, role["role_id"])
+        _require(previous is None or previous < role_id, "Manifest Roles are not uniquely sorted")
+        previous = role_id
+        resolved_roles.append(
+            {
+                "roleId": role_id,
+                "rolePromptIdentity": cast(str, role["role_prompt_identity"]),
+                "rolePromptDigest": cast(str, role["role_prompt_digest"]),
+                "agentProviderId": cast(str, role["agent_provider_id"]),
+                "modelProviderId": cast(str, role["model_provider_id"]),
+                "modelId": cast(str, role["model_id"]),
+                "resolutionSource": cast(str, role["resolution_source"]),
+            }
+        )
+    _require(
+        repository["resolved_map_digest"] == f"sha256:{canonical_digest(resolved_roles)}",
+        "resolved Role map digest mismatch",
+    )
+    return projection
 
 
 def _validate_span(record: dict[str, Any], attributes: dict[str, Any]) -> None:
@@ -455,6 +658,9 @@ def _validate_span(record: dict[str, Any], attributes: dict[str, Any]) -> None:
         "agentops.delivery.id agentops.workflow.id agentops.workflow.version agentops.implementation.id agentops.runtime.id agentops.manifest.digest agentops.workflow.family"
     )
     root_only = root_fields - {"agentops.runtime.id"}
+    if record["profile_version"] == TASK_PROFILE_VERSION:
+        _require("agentops.delivery.id" in attributes, "Profile 2 requires direct Delivery ID")
+        root_only -= {"agentops.delivery.id"}
     if delivery_root:
         _require(root_fields <= set(attributes), "incomplete Delivery root")
         _require(record["span_kind"] == "INTERNAL", "Delivery root must use INTERNAL Span kind")
@@ -511,7 +717,10 @@ def _validate_span(record: dict[str, Any], attributes: dict[str, Any]) -> None:
 
 def _validate_event(record: dict[str, Any], attributes: dict[str, Any]) -> None:
     event_name = record.get("event_name")
-    _require(event_name in EVENT_NAMES, "unknown EventName")
+    if record["profile_version"] == TASK_PROFILE_VERSION:
+        _require(event_name in EVENT_NAMES | {"task.binding"}, "unknown EventName")
+    else:
+        _require(event_name in EVENT_NAMES, "unknown EventName")
     event_name = cast(str, event_name)
     span_fields = _set(
         "span_name span_kind start_time_unix_nano end_time_unix_nano parent_span_id trace_state span_flags span_links span_status"
@@ -533,13 +742,28 @@ def _validate_event(record: dict[str, Any], attributes: dict[str, Any]) -> None:
         "standard Span attribute on Event",
     )
     allowed, required = EVENT_RULES[event_name]
+    if record["profile_version"] == TASK_PROFILE_VERSION:
+        allowed = allowed | {"agentops.delivery.id"}
+        required = required | {"agentops.delivery.id"}
+        _require("agentops.delivery.id" in attributes, "Profile 2 requires direct Delivery ID")
     disallowed = set(attributes) - allowed
     if disallowed:
         raise ValidationError(f"{sorted(disallowed)[0]} prohibited on {event_name}")
     _require(required <= set(attributes), f"incomplete closed field set for {event_name}")
+    if event_name == "task.binding":
+        _require(
+            re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/@-]*", attributes["agentops.task.id"])
+            is not None,
+            "task id is invalid",
+        )
+        expected_event_id = (
+            "task-binding-" + sha256(attributes["agentops.delivery.id"].encode()).hexdigest()[:24]
+        )
+        _require(attributes["agentops.event.id"] == expected_event_id, "unstable task binding id")
+        _parse_closed_manifest_projection(attributes)
     family = attributes.get("agentops.workflow.family")
     schema = attributes.get("agentops.family.schema")
-    if event_name != "sampling.decision":
+    if event_name not in {"sampling.decision", "task.binding"}:
         _require(
             (family, schema)
             in {("implementation", "implementation@1"), ("system-design", "system-design@1")},
@@ -665,6 +889,7 @@ def validate_record(logical: dict[str, Any]) -> ValidatedRecord:
         raise ValidationError("invalid record_type")
     return ValidatedRecord(
         logical=logical,
+        profile_version=logical["profile_version"],
         identity=identity,
         digest=canonical_digest(logical),
         attributes=attributes,

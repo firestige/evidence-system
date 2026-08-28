@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import deepcopy
+from hashlib import sha256
 from typing import Any
 
 import pytest
@@ -18,7 +19,7 @@ from opentelemetry.proto.resource.v1.resource_pb2 import Resource
 from opentelemetry.proto.trace.v1.trace_pb2 import ResourceSpans, ScopeSpans, Span, Status
 
 from wsr_evidence.admission.service import AdmissionService, Disposition
-from wsr_evidence.admission.validation import ValidationError, validate_record
+from wsr_evidence.admission.validation import ValidationError, canonical_bytes, validate_record
 from wsr_evidence.app import create_app
 from wsr_evidence.model import ProjectionEffect
 from wsr_evidence.transport.otlp import OtlpIngestor, decode_logs_request, decode_traces_request
@@ -34,12 +35,12 @@ def _kv(name: str, value: str | int | float) -> KeyValue:
     return KeyValue(key=name, value=any_value)
 
 
-def log_request(*records: LogRecord) -> bytes:
+def log_request(*records: LogRecord, service_name: str = "dsh") -> bytes:
     request = ExportLogsServiceRequest(
         resource_logs=[
             ResourceLogs(
                 resource=Resource(
-                    attributes=[_kv("service.name", "dsh"), _kv("service.version", "1")]
+                    attributes=[_kv("service.name", service_name), _kv("service.version", "1")]
                 ),
                 scope_logs=[
                     ScopeLogs(
@@ -65,6 +66,78 @@ def sampling_record(event_id: str, *, unknown: bool = False) -> LogRecord:
     if unknown:
         attributes.append(_kv("agentops.invalid.reason", "bad"))
     return LogRecord(event_name="sampling.decision", attributes=attributes)
+
+
+def task_binding_log() -> LogRecord:
+    roles: list[dict[str, str]] = []
+    projection = canonical_bytes(
+        {
+            "schema_version": "execution.delivery-manifest-projection@1.0.0",
+            "delivery_id": "delivery-1",
+            "task_id": "task-1",
+            "manifest_digest": "a" * 64,
+            "workflow": {
+                "package_name": "implementation",
+                "exact_package_version": "2.0.0",
+                "package_digest": f"sha256:{'b' * 64}",
+                "workflow_id": "workflow.implementation",
+                "workflow_version": "2.0.0",
+                "snapshot_id": "snapshot.implementation.2",
+                "snapshot_digest": f"sha256:{'c' * 64}",
+            },
+            "repository_model_bindings": {
+                "document_state": "ABSENT",
+                "resolved_map_digest": f"sha256:{sha256(canonical_bytes(roles)).hexdigest()}",
+            },
+            "roles": roles,
+        }
+    ).decode()
+    return LogRecord(
+        event_name="task.binding",
+        attributes=[
+            _kv("agentops.delivery.id", "delivery-1"),
+            _kv("agentops.task.id", "task-1"),
+            _kv("agentops.manifest.digest", "a" * 64),
+            _kv(
+                "agentops.event.id",
+                f"task-binding-{sha256(b'delivery-1').hexdigest()[:24]}",
+            ),
+            _kv("agentops.task.display_name", "Token tuning"),
+            _kv("agentops.delivery.manifest_projection", projection),
+            _kv(
+                "agentops.delivery.manifest_projection_digest",
+                sha256(projection.encode()).hexdigest(),
+            ),
+        ],
+    )
+
+
+def mixed_profile_log_request() -> bytes:
+    resource = Resource(attributes=[_kv("service.name", "dsh"), _kv("service.version", "1")])
+    request = ExportLogsServiceRequest(
+        resource_logs=[
+            ResourceLogs(
+                resource=resource,
+                scope_logs=[
+                    ScopeLogs(
+                        scope=InstrumentationScope(
+                            name="io.agentops.dsh.observation", version="1.0.0"
+                        ),
+                        schema_url="https://opentelemetry.io/schemas/1.41.0",
+                        log_records=[sampling_record("event-1")],
+                    ),
+                    ScopeLogs(
+                        scope=InstrumentationScope(
+                            name="io.agentops.dsh.observation", version="2.0.0"
+                        ),
+                        schema_url="https://opentelemetry.io/schemas/1.41.0",
+                        log_records=[task_binding_log()],
+                    ),
+                ],
+            )
+        ]
+    )
+    return request.SerializeToString()
 
 
 def usage_record(index: int) -> LogRecord:
@@ -159,6 +232,34 @@ def test_official_otlp_log_protobuf_decodes_to_closed_logical_record() -> None:
     assert records[0]["attributes"]["agentops.sampling.probability"] == 0.0
 
 
+@pytest.mark.asyncio
+async def test_profile_two_task_protobuf_projects_the_exact_authority_slice() -> None:
+    records = decode_logs_request(mixed_profile_log_request())
+    task = records[1]
+
+    validated = validate_record(task)
+    effects = AdmissionService.project(validated)
+
+    assert task["profile_version"] == "2.0.0"
+    assert [effect.kind for effect in effects] == [
+        "task_declaration",
+        "delivery_task_membership",
+        "delivery_task_guard",
+        "task_display_name",
+        "delivery_manifest",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mixed_profile_request_is_rejected_before_any_record_lands() -> None:
+    storage = MemoryStorage()
+    outcome = await OtlpIngestor(AdmissionService(storage)).ingest_logs(mixed_profile_log_request())
+
+    assert outcome.http_status == 400
+    assert outcome.rejected_items == 2
+    assert storage.state["identities"] == {}
+
+
 def test_official_otlp_trace_protobuf_preserves_native_identity_fields() -> None:
     records = decode_traces_request(trace_request())
 
@@ -235,3 +336,25 @@ async def test_http_otlp_response_is_standard_aggregate_protobuf_without_auth() 
     assert response.status_code == 200
     assert decoded.partial_success.rejected_log_records == 1
     assert "www-authenticate" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_http_accepts_a_conforming_external_producer_without_execution_identity() -> None:
+    storage = MemoryStorage()
+    app = create_app(otlp_ingestor=OtlpIngestor(AdmissionService(storage)))
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://evidence.test"
+    ) as client:
+        response = await client.post(
+            "/v1/logs",
+            content=log_request(
+                sampling_record("event-external-producer"),
+                service_name="third-party-agent",
+            ),
+            headers={"content-type": "application/x-protobuf"},
+        )
+
+    decoded = ExportLogsServiceResponse.FromString(response.content)
+    assert response.status_code == 200
+    assert decoded.partial_success.rejected_log_records == 0
+    assert ("event", "event-external-producer") in storage.state["identities"]

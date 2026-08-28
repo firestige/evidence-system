@@ -16,3 +16,8 @@ class QueryEffect(StoredEffect):
 @runtime_checkable
 class SnapshotReleaser(Protocol):
     async def release_snapshot(self, snapshot_id: str) -> None: ...
+
+
+@runtime_checkable
+class ManifestReader(Protocol):
+    async def read_manifest(self, *, manifest_digest: str) -> QueryEffect | None: ...

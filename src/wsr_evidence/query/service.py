@@ -9,11 +9,12 @@ import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from hashlib import sha256
 from typing import Any, cast
 
 from wsr_evidence.clock import Clock, SystemClock
 from wsr_evidence.query.faults import SnapshotError, SnapshotFault
-from wsr_evidence.query.model import QueryEffect, SnapshotReleaser
+from wsr_evidence.query.model import ManifestReader, QueryEffect, SnapshotReleaser
 from wsr_evidence.storage.read_model import (
     DEFAULT_PAGE_LIMIT,
     MAX_PAGE_LIMIT,
@@ -151,6 +152,7 @@ class QueryErrorCode(StrEnum):
     ROUTE_NOT_FOUND = "ROUTE_NOT_FOUND"
     QUERY_INTERNAL = "QUERY_INTERNAL"
     QUERY_UNAVAILABLE = "QUERY_UNAVAILABLE"
+    NOT_FOUND = "NOT_FOUND"
 
 
 class QueryError(Exception):
@@ -246,6 +248,87 @@ class QueryService:
             await self._release(page.snapshot_id)
         return response
 
+    async def tasks(
+        self, parameters: Mapping[str, str] | Sequence[tuple[str, str]]
+    ) -> dict[str, Any]:
+        normalized, cursor, limit = _normalize(parameters, route="TASKS")
+        keys = {name for name, _ in normalized}
+        membership = "task_id" in keys or "as_of" in keys
+        if membership and not {"task_id", "as_of"}.issubset(keys):
+            raise QueryError(
+                QueryErrorCode.INVALID_FILTER,
+                "task_id and as_of are required together",
+            )
+        page = await self._page("TASKS", normalized, cursor, limit)
+        try:
+            items = [
+                _task_membership_resource(effect) if membership else _task_list_resource(effect)
+                for effect in page.resources
+            ]
+            response = _task_envelope(page, items)
+        except Exception:
+            await self._release(page.snapshot_id)
+            raise
+        if cursor is None and page.next_cursor is None:
+            await self._release(page.snapshot_id)
+        return response
+
+    async def manifest(
+        self, parameters: Mapping[str, str] | Sequence[tuple[str, str]]
+    ) -> dict[str, Any]:
+        pairs = list(parameters.items()) if isinstance(parameters, Mapping) else list(parameters)
+        if (
+            len(pairs) != 1
+            or pairs[0][0] != "manifest_digest"
+            or re.fullmatch(r"[a-f0-9]{64}", pairs[0][1]) is None
+        ):
+            raise QueryError(
+                QueryErrorCode.INVALID_FILTER,
+                "exactly one lowercase manifest_digest is required",
+            )
+        if not isinstance(self._read_model, ManifestReader):
+            raise QueryError(QueryErrorCode.QUERY_UNAVAILABLE, "manifest storage is unavailable")
+        manifest_digest = pairs[0][1]
+        try:
+            effect = await self._read_model.read_manifest(manifest_digest=manifest_digest)
+        except Exception as error:
+            raise QueryError(
+                QueryErrorCode.QUERY_INTERNAL, "manifest query failed safely"
+            ) from error
+        if effect is None:
+            raise QueryError(QueryErrorCode.NOT_FOUND, "manifest was not found")
+        try:
+            canonical = effect.payload["canonical_projection"]
+            projection_digest = effect.payload["projection_digest"]
+            projection = json.loads(canonical)
+            valid = (
+                effect.kind == "delivery_manifest"
+                and effect.key == (manifest_digest,)
+                and isinstance(canonical, str)
+                and isinstance(projection_digest, str)
+                and sha256(canonical.encode()).hexdigest() == projection_digest
+                and json.dumps(
+                    projection, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ).encode()
+                == canonical.encode()
+                and isinstance(projection, dict)
+                and projection.get("manifest_digest") == manifest_digest
+            )
+            if not valid:
+                raise ValueError("stored Manifest projection integrity failure")
+        except Exception as error:
+            raise QueryError(
+                QueryErrorCode.QUERY_INTERNAL, "stored manifest is inconsistent"
+            ) from error
+        return {
+            "contract": {"name": "evidence.query", "revision": "1.0.0"},
+            "observation_profile": "2.0.0",
+            "read_model_revision": "2.0.0",
+            "manifest": projection,
+            "manifest_projection_digest": projection_digest,
+            "provenance": _task_provenance(effect),
+        }
+
     async def _release(self, snapshot_id: str) -> None:
         if isinstance(self._read_model, SnapshotReleaser):
             await self._read_model.release_snapshot(snapshot_id)
@@ -317,6 +400,8 @@ def _normalize(
         }
         if route == "FACTS"
         else common | {"delivery_id", "trace_id"}
+        if route == "TRACES"
+        else common | {"task_id", "as_of"}
     )
     if set(names) - allowed:
         raise QueryError(QueryErrorCode.INVALID_FILTER, "unknown query parameter")
@@ -339,7 +424,7 @@ def _normalize(
     _validate_filter_values(values, route=route)
     normalized_values = {name: value for name, value in pairs if name not in {"cursor", "limit"}}
     normalized_values["limit"] = str(limit)
-    for name in ("recorded_from", "recorded_to"):
+    for name in ("recorded_from", "recorded_to", "as_of"):
         if name in normalized_values:
             normalized_values[name] = _timestamp(_parse_utc(normalized_values[name]))
     normalized = tuple(sorted(normalized_values.items()))
@@ -389,6 +474,14 @@ def _validate_filter_values(values: Mapping[str, str], *, route: str) -> None:
     trace_id = values.get("trace_id")
     if trace_id is not None and TRACE_ID(trace_id) is None:
         raise QueryError(QueryErrorCode.INVALID_FILTER, "trace_id must be 32 lower-case hex")
+    if route == "TASKS":
+        task_id = values.get("task_id")
+        if task_id is not None and (
+            len(task_id) > 128 or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/@-]*", task_id) is None
+        ):
+            raise QueryError(QueryErrorCode.INVALID_FILTER, "task_id is invalid")
+        if "as_of" in values:
+            _parse_utc(values["as_of"])
 
 
 def _timestamp(value: datetime) -> str:
@@ -556,7 +649,7 @@ def _projected_attributes(effect: QueryEffect) -> dict[str, Any]:
         attributes = effect.payload.get("attributes")
         return cast(dict[str, Any], attributes) if isinstance(attributes, dict) else {}
     if effect.kind in {"finding_assertion", "role_lineage"}:
-        return dict(effect.payload)
+        return {name: value for name, value in effect.payload.items() if name != "_otel_context"}
     if effect.kind == "finding_target":
         attributes = {
             "agentops.finding.id": effect.key[0],
@@ -745,7 +838,7 @@ def _expired_compatibility(expiry: ExpiryRecord) -> dict[str, Any]:
     dimensions = [
         {"field": field, "value": value}
         for field, value in expiry.compatibility
-        if field not in {"family_schema", "event_name", "completeness", "delivery_id"}
+        if field not in {"family_schema", "event_name", "completeness", "delivery_id", "trace_id"}
     ]
     return {
         "family_schema": values.get("family_schema"),
@@ -800,10 +893,51 @@ def _trace_resource(effect: QueryEffect, *, ttl: timedelta | None) -> dict[str, 
     }
 
 
+def _task_provenance(effect: QueryEffect) -> dict[str, Any]:
+    return {
+        "accepted_digest": effect.accepted_digest,
+        "profile_version": effect.profile_version,
+        "source": _source(effect),
+    }
+
+
+def _task_list_resource(effect: QueryEffect) -> dict[str, Any]:
+    if effect.kind != "task_declaration":
+        raise QueryError(QueryErrorCode.QUERY_INTERNAL, "unsupported Task list projection kind")
+    return {
+        "task_id": effect.key[0],
+        "display_name": effect.payload.get("display_name"),
+        "provenance": _task_provenance(effect),
+    }
+
+
+def _task_membership_resource(effect: QueryEffect) -> dict[str, Any]:
+    if effect.kind != "delivery_task_membership":
+        raise QueryError(QueryErrorCode.QUERY_INTERNAL, "unsupported Task membership kind")
+    return {
+        "task_id": effect.key[0],
+        "delivery_id": effect.key[1],
+        "manifest_digest": effect.payload["manifest_digest"],
+        "recorded_at": _timestamp(effect.recorded_at),
+        "provenance": _task_provenance(effect),
+    }
+
+
 def _envelope(page: SnapshotPage[QueryEffect], items: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "contract": {"name": "evidence.query", "revision": page.contract_revision},
         "observation_profile": "1.0.0",
+        "read_model_revision": page.read_model_revision,
+        "snapshot": page.snapshot_id,
+        "items": items,
+        "next_cursor": page.next_cursor,
+    }
+
+
+def _task_envelope(page: SnapshotPage[QueryEffect], items: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "contract": {"name": "evidence.query", "revision": page.contract_revision},
+        "observation_profile": "2.0.0",
         "read_model_revision": page.read_model_revision,
         "snapshot": page.snapshot_id,
         "items": items,

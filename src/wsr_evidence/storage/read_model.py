@@ -13,7 +13,10 @@ from typing import Any, Protocol, runtime_checkable
 
 CORE_READ_MODEL_VERSION = "1.0.0"
 QUERY_CONTRACT_REVISION = "0.1.0"
+TASK_READ_MODEL_VERSION = "2.0.0"
+TASK_QUERY_CONTRACT_REVISION = "1.0.0"
 RETENTION_POLICY_REVISION = "1.0.0"
+DELIVERY_RETENTION_POLICY_REVISION = "2.0.0"
 
 DEFAULT_PAGE_LIMIT = 100
 MAX_PAGE_LIMIT = 200
@@ -25,6 +28,7 @@ DEFAULT_TRACE_DETAIL_TTL = timedelta(days=30)
 DEFAULT_FACTUAL_PROJECTION_TTL = timedelta(days=365)
 DEFAULT_RETENTION_BATCH_SIZE = 500
 DEFAULT_RETENTION_INTERVAL = timedelta(seconds=60)
+DEFAULT_DELIVERY_TTL = timedelta(days=30)
 
 Scalar = str | int | float | bool | None
 OwnerKey = tuple[Scalar, ...]
@@ -161,6 +165,39 @@ class RetentionPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class DeliveryRetentionPolicy:
+    """Current policy: raw privacy scrub plus Delivery-atomic physical deletion."""
+
+    raw_debug_ttl: timedelta = DEFAULT_RAW_DEBUG_TTL
+    delivery_ttl: timedelta | None = DEFAULT_DELIVERY_TTL
+    batch_size: int = DEFAULT_RETENTION_BATCH_SIZE
+    interval: timedelta = DEFAULT_RETENTION_INTERVAL
+    revision: str = field(init=False, default=DELIVERY_RETENTION_POLICY_REVISION)
+
+    def __post_init__(self) -> None:
+        _bounded_ttl(
+            self.raw_debug_ttl,
+            name="raw_debug_ttl",
+            minimum=timedelta(0),
+            maximum=timedelta(days=1),
+            never_allowed=False,
+        )
+        _bounded_ttl(
+            self.delivery_ttl,
+            name="delivery_ttl",
+            minimum=timedelta(days=1),
+            maximum=timedelta(days=3650),
+            never_allowed=True,
+        )
+        if not 1 <= self.batch_size <= 1000:
+            raise ValueError("batch_size must be in [1,1000]")
+        if self.interval.microseconds or not timedelta(seconds=10) <= self.interval <= timedelta(
+            seconds=3600
+        ):
+            raise ValueError("interval must be whole seconds in [10,3600]")
+
+
+@dataclass(frozen=True, slots=True)
 class SnapshotPage[ResourceT]:
     contract_revision: str
     read_model_revision: str
@@ -169,10 +206,11 @@ class SnapshotPage[ResourceT]:
     next_cursor: str | None
 
     def __post_init__(self) -> None:
-        if self.contract_revision != QUERY_CONTRACT_REVISION:
-            raise ValueError("snapshot Contract revision mismatch")
-        if self.read_model_revision != CORE_READ_MODEL_VERSION:
-            raise ValueError("snapshot read-model revision mismatch")
+        if (self.contract_revision, self.read_model_revision) not in {
+            (QUERY_CONTRACT_REVISION, CORE_READ_MODEL_VERSION),
+            (TASK_QUERY_CONTRACT_REVISION, TASK_READ_MODEL_VERSION),
+        }:
+            raise ValueError("snapshot Contract/read-model revision mismatch")
         if not self.snapshot_id:
             raise ValueError("snapshot_id must be nonempty")
 
@@ -277,7 +315,7 @@ def _validate_compatibility(record: ExpiryRecord) -> None:
         if pairs:
             raise ValueError("Raw and Trace expiry compatibility must be empty")
         return
-    if not 3 <= len(pairs) <= 7 or tuple(key for key, _ in pairs[:3]) != (
+    if not 3 <= len(pairs) <= 8 or tuple(key for key, _ in pairs[:3]) != (
         "family_schema",
         "event_name",
         "completeness",
@@ -302,6 +340,16 @@ def _validate_compatibility(record: ExpiryRecord) -> None:
         allowed_suffix = ("gen_ai.provider.name", "C57", "C30", "C06")
     elif record.resource_kind == "DELIVERY_ROOT_BINDING":
         allowed_suffix = ("delivery_id",)
+    if record.resource_kind in {
+        "EVENT_CONTRIBUTION",
+        "FINDING_ASSERTION",
+        "FINDING_TARGET",
+        "FINDING_STATUS",
+        "FINDING_FIX",
+        "FINDING_RECHECK",
+        "ROLE_LINEAGE",
+    }:
+        allowed_suffix = (*allowed_suffix, "trace_id")
     suffix = keys[3:]
     positions = [allowed_suffix.index(key) for key in suffix if key in allowed_suffix]
     if len(positions) != len(suffix) or positions != sorted(positions):
@@ -507,6 +555,73 @@ class ExpiryResult:
             raise ValueError("expiry result must exactly partition selected resources")
 
 
+@dataclass(frozen=True, slots=True)
+class DeliveryDeletionBatch:
+    batch_identity: str
+    policy_revision: str
+    cutoff: datetime
+    ttl_seconds: int
+    delivery_ids: tuple[str, ...]
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        policy_revision: str,
+        cutoff: datetime,
+        ttl_seconds: int,
+        delivery_ids: tuple[str, ...],
+    ) -> DeliveryDeletionBatch:
+        if not policy_revision:
+            raise ValueError("policy_revision must be nonempty")
+        _require_aware(cutoff, "cutoff")
+        if not isinstance(ttl_seconds, int) or isinstance(ttl_seconds, bool) or ttl_seconds < 0:
+            raise ValueError("ttl_seconds must be a nonnegative integer")
+        if len(delivery_ids) > 1000:
+            raise ValueError("Delivery deletion batch cannot exceed 1000 members")
+        if any(not isinstance(delivery_id, str) or not delivery_id for delivery_id in delivery_ids):
+            raise ValueError("delivery_id must be nonempty")
+        ordered = tuple(sorted(delivery_ids))
+        if any(left == right for left, right in zip(ordered, ordered[1:], strict=False)):
+            raise ValueError("Delivery deletion batch members must be unique")
+        normalized_cutoff = cutoff.astimezone(UTC)
+        cutoff_text = normalized_cutoff.isoformat(timespec="microseconds").replace("+00:00", "Z")
+        encoded = b"".join(
+            (
+                b"evidence-delivery-deletion-batch-v1\n",
+                _encode_scalar(policy_revision),
+                _encode_scalar(cutoff_text),
+                _encode_scalar(ttl_seconds),
+                _encode_array(ordered),
+            )
+        )
+        return cls(
+            batch_identity=hashlib.sha256(encoded).hexdigest(),
+            policy_revision=policy_revision,
+            cutoff=normalized_cutoff,
+            ttl_seconds=ttl_seconds,
+            delivery_ids=ordered,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryDeletionResult:
+    batch_identity: str
+    selected: int
+    deleted: int
+    already_deleted: int
+
+    def __post_init__(self) -> None:
+        if len(self.batch_identity) != 64 or any(
+            character not in "0123456789abcdef" for character in self.batch_identity
+        ):
+            raise ValueError("batch_identity must be lower-case SHA-256 hex")
+        if min(self.selected, self.deleted, self.already_deleted) < 0:
+            raise ValueError("Delivery deletion counts must be nonnegative")
+        if self.deleted + self.already_deleted != self.selected:
+            raise ValueError("Delivery deletion result must exactly partition selected Deliveries")
+
+
 @runtime_checkable
 class QueryExpiryReadModel[ResourceT](Protocol):
     async def acquire_snapshot(
@@ -547,6 +662,22 @@ class ExpiryMaintenance(Protocol):
     ) -> ExpiryBatch: ...
 
     async def apply_expiry(self, *, batch: ExpiryBatch, clock_now: datetime) -> ExpiryResult: ...
+
+
+@runtime_checkable
+class DeliveryRetentionMaintenance(ExpiryMaintenance, Protocol):
+    async def plan_delivery_deletion(
+        self,
+        *,
+        policy_revision: str,
+        cutoff: datetime,
+        ttl_seconds: int,
+        limit: int,
+    ) -> DeliveryDeletionBatch: ...
+
+    async def apply_delivery_deletion(
+        self, *, batch: DeliveryDeletionBatch, clock_now: datetime
+    ) -> DeliveryDeletionResult: ...
 
 
 @dataclass(frozen=True, slots=True)

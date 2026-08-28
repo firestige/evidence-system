@@ -88,13 +88,17 @@ class FakeReadModel:
         expiries: dict[tuple[object, ...], ExpiryRecord] | None = None,
         trace_summaries: tuple[TraceSummary, ...] | None = None,
         continuation_fault: SnapshotFault | None = None,
+        manifest: QueryEffect | None = None,
     ) -> None:
         self.resources = resources
         self.expiry = expiry
         self.expiries = expiries or {}
         self.trace_summaries = trace_summaries
         self.continuation_fault = continuation_fault
+        self.manifest = manifest
         self.released: list[str] = []
+        self.acquired: list[tuple[str, tuple[tuple[str, str], ...], int]] = []
+        self.last_query = "FACTS"
 
     async def acquire_snapshot(
         self,
@@ -104,10 +108,12 @@ class FakeReadModel:
         limit: int,
         clock_now: datetime,
     ) -> SnapshotPage[QueryEffect]:
-        del query, filters, limit, clock_now
+        del clock_now
+        self.acquired.append((query, filters, limit))
+        self.last_query = query
         return SnapshotPage(
-            contract_revision="0.1.0",
-            read_model_revision="1.0.0",
+            contract_revision="1.0.0" if query == "TASKS" else "0.1.0",
+            read_model_revision="2.0.0" if query == "TASKS" else "1.0.0",
             snapshot_id="snapshot-1",
             resources=self.resources,
             next_cursor=None,
@@ -120,7 +126,7 @@ class FakeReadModel:
             raise SnapshotError(self.continuation_fault, "bounded storage fault")
         del cursor, clock_now
         return await self.acquire_snapshot(
-            query="FACTS", filters=(), limit=100, clock_now=datetime.now(UTC)
+            query=self.last_query, filters=(), limit=100, clock_now=datetime.now(UTC)
         )
 
     async def read_expiry(self, **kwargs: object) -> ExpiryRecord | None:
@@ -140,6 +146,202 @@ class FakeReadModel:
 
     async def release_snapshot(self, snapshot_id: str) -> None:
         self.released.append(snapshot_id)
+
+    async def read_manifest(self, *, manifest_digest: str) -> QueryEffect | None:
+        if self.manifest is None or self.manifest.key != (manifest_digest,):
+            return None
+        return self.manifest
+
+
+def task_effect(
+    *,
+    kind: str,
+    key: tuple[str, ...],
+    payload: dict[str, str],
+    event_id: str = "task-event-1",
+    recorded_at: datetime = datetime(2026, 8, 26, 1, 2, 3, tzinfo=UTC),
+) -> QueryEffect:
+    return QueryEffect(
+        kind=kind,
+        key=key,
+        payload=payload,
+        source_identity=("event", json.dumps(["event", event_id], separators=(",", ":"))),
+        recorded_at=recorded_at,
+        accepted_digest="b" * 64,
+        profile_version="2.0.0",
+        family_schema=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_task_list_preserves_id_identity_and_optional_display_name() -> None:
+    read_model = FakeReadModel(
+        (
+            task_effect(
+                kind="task_declaration",
+                key=("task-a",),
+                payload={"display_name": "Agent 配置基线"},
+            ),
+            task_effect(kind="task_declaration", key=("task-b",), payload={}),
+        )
+    )
+
+    response = await QueryService(read_model).tasks({})
+
+    assert response["contract"] == {"name": "evidence.query", "revision": "1.0.0"}
+    assert response["observation_profile"] == "2.0.0"
+    assert response["read_model_revision"] == "2.0.0"
+    assert [(item["task_id"], item["display_name"]) for item in response["items"]] == [
+        ("task-a", "Agent 配置基线"),
+        ("task-b", None),
+    ]
+    assert response["items"][0]["provenance"] == {
+        "accepted_digest": "b" * 64,
+        "profile_version": "2.0.0",
+        "source": {"kind": "EVENT", "event_id": "task-event-1"},
+    }
+    assert read_model.released == ["snapshot-1"]
+
+
+@pytest.mark.asyncio
+async def test_task_membership_requires_exact_task_and_normalized_as_of() -> None:
+    membership = task_effect(
+        kind="delivery_task_membership",
+        key=("task-a", "delivery-2"),
+        payload={"manifest_digest": MANIFEST_DIGEST},
+    )
+    read_model = FakeReadModel((membership,))
+
+    response = await QueryService(read_model).tasks(
+        {"task_id": "task-a", "as_of": "2026-08-26T01:02:04Z"}
+    )
+
+    assert response["items"][0] == {
+        "task_id": "task-a",
+        "delivery_id": "delivery-2",
+        "manifest_digest": MANIFEST_DIGEST,
+        "recorded_at": "2026-08-26T01:02:03.000000Z",
+        "provenance": {
+            "accepted_digest": "b" * 64,
+            "profile_version": "2.0.0",
+            "source": {"kind": "EVENT", "event_id": "task-event-1"},
+        },
+    }
+    assert read_model.acquired == [
+        (
+            "TASKS",
+            (
+                ("as_of", "2026-08-26T01:02:04.000000Z"),
+                ("limit", "100"),
+                ("task_id", "task-a"),
+            ),
+            100,
+        )
+    ]
+
+    for parameters in ({"task_id": "task-a"}, {"as_of": "2026-08-26T01:02:04Z"}):
+        with pytest.raises(QueryError) as caught:
+            await QueryService(read_model).tasks(parameters)
+        assert caught.value.code is QueryErrorCode.INVALID_FILTER
+
+    for invalid_task_id in ("a" * 129, " task-a", "task?a"):
+        with pytest.raises(QueryError) as caught:
+            await QueryService(read_model).tasks(
+                {"task_id": invalid_task_id, "as_of": "2026-08-26T01:02:04Z"}
+            )
+        assert caught.value.code is QueryErrorCode.INVALID_FILTER
+
+
+@pytest.mark.asyncio
+async def test_http_task_query_is_read_only_and_rejects_repeated_filters() -> None:
+    service = QueryService(FakeReadModel(()))
+    transport = ASGITransport(app=create_app(query_service=service))
+    async with AsyncClient(transport=transport, base_url="http://evidence.test") as client:
+        success = await client.get("/v1/evidence/tasks")
+        repeated = await client.get(
+            "/v1/evidence/tasks?task_id=a&task_id=b&as_of=2026-08-26T01:02:04Z"
+        )
+        body = await client.request("GET", "/v1/evidence/tasks", content=b"not-allowed")
+        write = await client.post("/v1/evidence/tasks", json={})
+
+    assert success.status_code == 200
+    assert repeated.status_code == 400
+    assert repeated.json()["error"]["code"] == "INVALID_FILTER"
+    assert body.status_code == 400
+    assert write.status_code == 405
+
+
+@pytest.mark.asyncio
+async def test_exact_manifest_query_returns_one_closed_projection_without_snapshot() -> None:
+    projection = {
+        "schema_version": "execution.delivery-manifest-projection@1.0.0",
+        "delivery_id": "delivery-2",
+        "task_id": "task-a",
+        "manifest_digest": MANIFEST_DIGEST,
+        "workflow": {},
+        "repository_model_bindings": {},
+        "roles": [],
+    }
+    canonical = json.dumps(projection, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    effect = task_effect(
+        kind="delivery_manifest",
+        key=(MANIFEST_DIGEST,),
+        payload={
+            "canonical_projection": canonical,
+            "projection_digest": __import__("hashlib").sha256(canonical.encode()).hexdigest(),
+        },
+    )
+    service = QueryService(FakeReadModel((), manifest=effect))
+
+    response = await service.manifest({"manifest_digest": MANIFEST_DIGEST})
+
+    assert "snapshot" not in response
+    assert response == {
+        "contract": {"name": "evidence.query", "revision": "1.0.0"},
+        "observation_profile": "2.0.0",
+        "read_model_revision": "2.0.0",
+        "manifest": projection,
+        "manifest_projection_digest": effect.payload["projection_digest"],
+        "provenance": {
+            "accepted_digest": "b" * 64,
+            "profile_version": "2.0.0",
+            "source": {"kind": "EVENT", "event_id": "task-event-1"},
+        },
+    }
+
+    with pytest.raises(QueryError) as missing:
+        await QueryService(FakeReadModel(())).manifest({"manifest_digest": MANIFEST_DIGEST})
+    assert missing.value.code is QueryErrorCode.NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_manifest_http_route_is_exact_read_only_and_integrity_checked() -> None:
+    canonical = json.dumps(
+        {"manifest_digest": MANIFEST_DIGEST}, sort_keys=True, separators=(",", ":")
+    )
+    corrupt = task_effect(
+        kind="delivery_manifest",
+        key=(MANIFEST_DIGEST,),
+        payload={"canonical_projection": canonical, "projection_digest": "f" * 64},
+    )
+    transport = ASGITransport(
+        app=create_app(query_service=QueryService(FakeReadModel((), manifest=corrupt)))
+    )
+    async with AsyncClient(transport=transport, base_url="http://evidence.test") as client:
+        integrity = await client.get(f"/v1/evidence/manifests?manifest_digest={MANIFEST_DIGEST}")
+        repeated = await client.get(
+            f"/v1/evidence/manifests?manifest_digest={MANIFEST_DIGEST}&manifest_digest={'a' * 64}"
+        )
+        extra = await client.get(
+            f"/v1/evidence/manifests?manifest_digest={MANIFEST_DIGEST}&limit=1"
+        )
+        write = await client.post("/v1/evidence/manifests", json={})
+
+    assert integrity.status_code == 500
+    assert integrity.json()["error"]["code"] == "QUERY_INTERNAL"
+    assert repeated.status_code == 400
+    assert extra.status_code == 400
+    assert write.status_code == 405
 
 
 @pytest.mark.asyncio
