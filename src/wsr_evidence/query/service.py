@@ -246,6 +246,31 @@ class QueryService:
             await self._release(page.snapshot_id)
         return response
 
+    async def tasks(
+        self, parameters: Mapping[str, str] | Sequence[tuple[str, str]]
+    ) -> dict[str, Any]:
+        normalized, cursor, limit = _normalize(parameters, route="TASKS")
+        keys = {name for name, _ in normalized}
+        membership = "task_id" in keys or "as_of" in keys
+        if membership and not {"task_id", "as_of"}.issubset(keys):
+            raise QueryError(
+                QueryErrorCode.INVALID_FILTER,
+                "task_id and as_of are required together",
+            )
+        page = await self._page("TASKS", normalized, cursor, limit)
+        try:
+            items = [
+                _task_membership_resource(effect) if membership else _task_list_resource(effect)
+                for effect in page.resources
+            ]
+            response = _task_envelope(page, items)
+        except Exception:
+            await self._release(page.snapshot_id)
+            raise
+        if cursor is None and page.next_cursor is None:
+            await self._release(page.snapshot_id)
+        return response
+
     async def _release(self, snapshot_id: str) -> None:
         if isinstance(self._read_model, SnapshotReleaser):
             await self._read_model.release_snapshot(snapshot_id)
@@ -317,6 +342,8 @@ def _normalize(
         }
         if route == "FACTS"
         else common | {"delivery_id", "trace_id"}
+        if route == "TRACES"
+        else common | {"task_id", "as_of"}
     )
     if set(names) - allowed:
         raise QueryError(QueryErrorCode.INVALID_FILTER, "unknown query parameter")
@@ -339,7 +366,7 @@ def _normalize(
     _validate_filter_values(values, route=route)
     normalized_values = {name: value for name, value in pairs if name not in {"cursor", "limit"}}
     normalized_values["limit"] = str(limit)
-    for name in ("recorded_from", "recorded_to"):
+    for name in ("recorded_from", "recorded_to", "as_of"):
         if name in normalized_values:
             normalized_values[name] = _timestamp(_parse_utc(normalized_values[name]))
     normalized = tuple(sorted(normalized_values.items()))
@@ -389,6 +416,12 @@ def _validate_filter_values(values: Mapping[str, str], *, route: str) -> None:
     trace_id = values.get("trace_id")
     if trace_id is not None and TRACE_ID(trace_id) is None:
         raise QueryError(QueryErrorCode.INVALID_FILTER, "trace_id must be 32 lower-case hex")
+    if route == "TASKS":
+        task_id = values.get("task_id")
+        if task_id is not None and len(task_id.encode()) > 256:
+            raise QueryError(QueryErrorCode.INVALID_FILTER, "task_id is too long")
+        if "as_of" in values:
+            _parse_utc(values["as_of"])
 
 
 def _timestamp(value: datetime) -> str:
@@ -800,10 +833,54 @@ def _trace_resource(effect: QueryEffect, *, ttl: timedelta | None) -> dict[str, 
     }
 
 
+def _task_provenance(effect: QueryEffect, *, include_recorded_at: bool) -> dict[str, Any]:
+    provenance: dict[str, Any] = {
+        "accepted_digest": effect.accepted_digest,
+        "profile_version": effect.profile_version,
+        "source": _source(effect),
+    }
+    if include_recorded_at:
+        provenance["recorded_at"] = _timestamp(effect.recorded_at)
+    return provenance
+
+
+def _task_list_resource(effect: QueryEffect) -> dict[str, Any]:
+    if effect.kind != "task_declaration":
+        raise QueryError(QueryErrorCode.QUERY_INTERNAL, "unsupported Task list projection kind")
+    return {
+        "task_id": effect.key[0],
+        "display_name": effect.payload.get("display_name"),
+        "provenance": _task_provenance(effect, include_recorded_at=True),
+    }
+
+
+def _task_membership_resource(effect: QueryEffect) -> dict[str, Any]:
+    if effect.kind != "delivery_task_membership":
+        raise QueryError(QueryErrorCode.QUERY_INTERNAL, "unsupported Task membership kind")
+    return {
+        "task_id": effect.key[0],
+        "delivery_id": effect.key[1],
+        "manifest_digest": effect.payload["manifest_digest"],
+        "recorded_at": _timestamp(effect.recorded_at),
+        "provenance": _task_provenance(effect, include_recorded_at=False),
+    }
+
+
 def _envelope(page: SnapshotPage[QueryEffect], items: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "contract": {"name": "evidence.query", "revision": page.contract_revision},
         "observation_profile": "1.0.0",
+        "read_model_revision": page.read_model_revision,
+        "snapshot": page.snapshot_id,
+        "items": items,
+        "next_cursor": page.next_cursor,
+    }
+
+
+def _task_envelope(page: SnapshotPage[QueryEffect], items: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "contract": {"name": "evidence.query", "revision": page.contract_revision},
+        "observation_profile": "2.0.0",
         "read_model_revision": page.read_model_revision,
         "snapshot": page.snapshot_id,
         "items": items,

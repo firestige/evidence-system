@@ -13,6 +13,8 @@ from typing import Any, Protocol, runtime_checkable
 
 CORE_READ_MODEL_VERSION = "1.0.0"
 QUERY_CONTRACT_REVISION = "0.1.0"
+TASK_READ_MODEL_VERSION = "2.0.0"
+TASK_QUERY_CONTRACT_REVISION = "1.0.0"
 RETENTION_POLICY_REVISION = "1.0.0"
 
 DEFAULT_PAGE_LIMIT = 100
@@ -169,10 +171,11 @@ class SnapshotPage[ResourceT]:
     next_cursor: str | None
 
     def __post_init__(self) -> None:
-        if self.contract_revision != QUERY_CONTRACT_REVISION:
-            raise ValueError("snapshot Contract revision mismatch")
-        if self.read_model_revision != CORE_READ_MODEL_VERSION:
-            raise ValueError("snapshot read-model revision mismatch")
+        if (self.contract_revision, self.read_model_revision) not in {
+            (QUERY_CONTRACT_REVISION, CORE_READ_MODEL_VERSION),
+            (TASK_QUERY_CONTRACT_REVISION, TASK_READ_MODEL_VERSION),
+        }:
+            raise ValueError("snapshot Contract/read-model revision mismatch")
         if not self.snapshot_id:
             raise ValueError("snapshot_id must be nonempty")
 

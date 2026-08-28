@@ -102,10 +102,21 @@ def create_query_router() -> APIRouter:
         except Exception:
             return _error(QueryError(QueryErrorCode.QUERY_INTERNAL, "query failed safely"))
 
+    @router.get("/v1/evidence/tasks")
+    async def tasks(request: Request) -> JSONResponse:
+        try:
+            service = await _prepare(request)
+            result = await service.tasks(list(request.query_params.multi_items()))
+            return JSONResponse(content=result)
+        except QueryError as error:
+            return _error(error)
+        except Exception:
+            return _error(QueryError(QueryErrorCode.QUERY_INTERNAL, "query failed safely"))
+
     async def method_not_allowed() -> JSONResponse:
         return _error(QueryError(QueryErrorCode.METHOD_NOT_ALLOWED, "method is not allowed"))
 
-    for path in ("/v1/evidence/facts", "/v1/evidence/traces"):
+    for path in ("/v1/evidence/facts", "/v1/evidence/traces", "/v1/evidence/tasks"):
         router.add_api_route(
             path,
             method_not_allowed,

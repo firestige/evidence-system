@@ -20,6 +20,8 @@ from wsr_evidence.storage.read_model import (
     DEFAULT_SNAPSHOT_LEASE_LIMIT,
     DEFAULT_SNAPSHOT_LEASE_TTL,
     QUERY_CONTRACT_REVISION,
+    TASK_QUERY_CONTRACT_REVISION,
+    TASK_READ_MODEL_VERSION,
     ExpiryRecord,
     OwnerKey,
     ResourceClass,
@@ -40,6 +42,7 @@ FACT_EFFECT_KINDS = (
     "model_attribution",
 )
 TRACE_EFFECT_KINDS = ("trace_node", "trace_parent_edge", "trace_link")
+TASK_EFFECT_KINDS = ("task_declaration", "delivery_task_membership")
 PUBLIC_FACT_KINDS = {
     "factual_contribution": "EVENT_CONTRIBUTION",
     "finding_assertion": "FINDING_ASSERTION",
@@ -147,7 +150,7 @@ class PostgresQueryReadModel:
         limit: int,
         clock_now: datetime,
     ) -> SnapshotPage[QueryEffect]:
-        if query not in {"FACTS", "TRACES"} or not 1 <= limit <= 200:
+        if query not in {"FACTS", "TRACES", "TASKS"} or not 1 <= limit <= 200:
             raise SnapshotError(SnapshotFault.INVALID, "invalid snapshot query")
         async with self._lease_guard:
             await self._evict_expired(clock_now)
@@ -321,9 +324,12 @@ class PostgresQueryReadModel:
                 next_cursor = secrets.token_urlsafe(32)
                 self._continuation_tokens[cache_key] = next_cursor
                 self._cursors[next_cursor] = (lease.snapshot_id, next_after)
+        task_query = lease.query == "TASKS"
         return SnapshotPage(
-            contract_revision=QUERY_CONTRACT_REVISION,
-            read_model_revision=CORE_READ_MODEL_VERSION,
+            contract_revision=(
+                TASK_QUERY_CONTRACT_REVISION if task_query else QUERY_CONTRACT_REVISION
+            ),
+            read_model_revision=TASK_READ_MODEL_VERSION if task_query else CORE_READ_MODEL_VERSION,
             snapshot_id=lease.snapshot_id,
             resources=tuple(_query_effect(row) for row in selected),
             next_cursor=next_cursor,
@@ -332,7 +338,18 @@ class PostgresQueryReadModel:
     async def _snapshot_rows(
         self, lease: _SnapshotLease, *, after: tuple[Any, ...] | None
     ) -> list[tuple[Any, ...]]:
-        kinds = FACT_EFFECT_KINDS if lease.query == "FACTS" else TRACE_EFFECT_KINDS
+        task_membership = lease.query == "TASKS" and any(
+            name == "task_id" for name, _ in lease.filters
+        )
+        kinds = (
+            FACT_EFFECT_KINDS
+            if lease.query == "FACTS"
+            else TASK_EFFECT_KINDS[1:]
+            if task_membership
+            else TASK_EFFECT_KINDS[:1]
+            if lease.query == "TASKS"
+            else TRACE_EFFECT_KINDS
+        )
         clauses = ["pe.effect_kind = ANY(%s)"]
         parameters: list[Any] = [list(kinds)]
         for name, value in lease.filters:
@@ -351,23 +368,58 @@ class PostgresQueryReadModel:
         sort_columns = (
             ("pe.recorded_at", FACT_KIND_SQL, FACT_ID_SQL)
             if lease.query == "FACTS"
+            else (
+                '(pe.effect_key::jsonb ->> 1) COLLATE "C"',
+                "0",
+                "pe.effect_key",
+            )
+            if task_membership
+            else ('(pe.effect_key::jsonb ->> 0) COLLATE "C"', "0", "pe.effect_key")
+            if lease.query == "TASKS"
             else ("pe.effect_key::jsonb ->> 0", TRACE_KIND_ORDER_SQL, TRACE_ID_SQL)
         )
         if after is not None:
             clauses.append(f"({', '.join(sort_columns)}) > (%s, %s, %s)")
             parameters.extend(after)
         parameters.append(lease.limit + 1)
+        task_list = lease.query == "TASKS" and not task_membership
+        payload_sql = (
+            "pe.payload || CASE WHEN display.effect_key IS NULL THEN '{}'::jsonb ELSE "
+            "jsonb_build_object('display_name', display.payload ->> 'display_name') END"
+            if task_list
+            else "pe.payload"
+        )
+        source_kind_sql = (
+            "COALESCE(display.source_identity_kind, pe.source_identity_kind)"
+            if task_list
+            else "pe.source_identity_kind"
+        )
+        source_key_sql = (
+            "COALESCE(display.source_identity_key, pe.source_identity_key)"
+            if task_list
+            else "pe.source_identity_key"
+        )
+        recorded_at_sql = (
+            "COALESCE(display.recorded_at, pe.recorded_at)" if task_list else "pe.recorded_at"
+        )
+        display_join = (
+            "LEFT JOIN projection_effects display ON display.effect_kind = "
+            "'task_display_name' AND display.effect_key = pe.effect_key"
+            if task_list
+            else ""
+        )
         statement = f"""
-            SELECT pe.effect_kind, pe.effect_key, pe.payload, pe.source_identity_kind,
-                   pe.source_identity_key, pe.recorded_at, ar.canonical_digest,
+            SELECT pe.effect_kind, pe.effect_key, {payload_sql}, {source_kind_sql},
+                   {source_key_sql}, {recorded_at_sql}, ar.canonical_digest,
                    ar.profile_version, ar.family_schema,
                    {sort_columns[0]} AS sort_a,
                    {sort_columns[1]} AS sort_b,
                    {sort_columns[2]} AS sort_c
             FROM projection_effects pe
+            {display_join}
             JOIN accepted_records ar
-              ON ar.identity_kind = pe.source_identity_kind
-             AND ar.identity_key = pe.source_identity_key
+              ON ar.identity_kind = {source_kind_sql}
+             AND ar.identity_key = {source_key_sql}
             WHERE {" AND ".join(clauses)}
             ORDER BY sort_a, sort_b, sort_c
             LIMIT %s
@@ -442,6 +494,12 @@ class PostgresQueryReadModel:
         elif name in {"recorded_from", "recorded_to"}:
             operator = ">=" if name == "recorded_from" else "<="
             clauses.append(f"pe.recorded_at {operator} %s")
+            parameters.append(value)
+        elif query == "TASKS" and name == "task_id":
+            clauses.append("pe.effect_key::jsonb ->> 0 = %s")
+            parameters.append(value)
+        elif query == "TASKS" and name == "as_of":
+            clauses.append("pe.recorded_at <= %s::timestamptz")
             parameters.append(value)
         else:
             raise SnapshotError(SnapshotFault.INVALID, "unsupported snapshot filter")

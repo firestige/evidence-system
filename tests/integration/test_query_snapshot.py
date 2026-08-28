@@ -76,6 +76,31 @@ def span_record(trace_id: str, *, delivery_id: str = "delivery-1") -> dict[str, 
     }
 
 
+def task_binding_record(
+    *, delivery_id: str, event_id: str, display_name: str | None = None
+) -> dict[str, Any]:
+    attributes = {
+        "agentops.delivery.id": delivery_id,
+        "agentops.task.id": "task-1",
+        "agentops.manifest.digest": "d" * 64,
+        "agentops.event.id": event_id,
+    }
+    if display_name is not None:
+        attributes["agentops.task.display_name"] = display_name
+    return {
+        "profile_version": "2.0.0",
+        "record_type": "event",
+        "event_name": "task.binding",
+        "resource": {"service.name": "execution", "service.version": "0.1.3"},
+        "scope": {
+            "name": "io.agentops.dsh.observation",
+            "version": "2.0.0",
+            "schema_url": "https://opentelemetry.io/schemas/1.41.0",
+        },
+        "attributes": attributes,
+    }
+
+
 async def clear_core(database_url: str) -> None:
     async with await psycopg.AsyncConnection.connect(database_url) as connection:
         await connection.execute(
@@ -114,6 +139,56 @@ async def test_snapshot_cursor_excludes_later_commits_and_is_replay_stable() -> 
         assert [effect.key for effect in second.resources] == [("sampling.decision", "event-b")]
         assert replay == second
         assert second.next_cursor is None
+    finally:
+        await query_storage.close()
+        await storage.close()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_task_query_joins_name_provenance_and_applies_membership_cutoff() -> None:
+    database_url = os.environ.get("WSR_EVIDENCE_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("WSR_EVIDENCE_DATABASE_URL is not configured")
+    await clear_core(database_url)
+    storage = await PostgresStorage.open(database_url)
+    query_storage = PostgresQueryReadModel.from_storage(storage)
+    admission = AdmissionService(storage)
+    first_at = datetime(2026, 8, 26, 1, tzinfo=UTC)
+    second_at = datetime(2026, 8, 26, 2, tzinfo=UTC)
+    try:
+        assert (
+            await admission.admit(
+                task_binding_record(delivery_id="delivery-1", event_id="task-event-1")
+            )
+        ).disposition is Disposition.ACCEPTED
+        assert (
+            await admission.admit(
+                task_binding_record(
+                    delivery_id="delivery-2",
+                    event_id="task-event-2",
+                    display_name="Token tuning",
+                )
+            )
+        ).disposition is Disposition.ACCEPTED
+        async with await psycopg.AsyncConnection.connect(database_url) as connection:
+            await connection.execute(
+                "UPDATE projection_effects SET recorded_at = %s WHERE source_identity_key = %s",
+                (first_at, '["event","task-event-1"]'),
+            )
+            await connection.execute(
+                "UPDATE projection_effects SET recorded_at = %s WHERE source_identity_key = %s",
+                (second_at, '["event","task-event-2"]'),
+            )
+
+        listed = await QueryService(query_storage).tasks({})
+        assert listed["items"][0]["display_name"] == "Token tuning"
+        assert listed["items"][0]["provenance"]["source"]["event_id"] == "task-event-2"
+
+        membership = await QueryService(query_storage).tasks(
+            {"task_id": "task-1", "as_of": "2026-08-26T01:30:00Z"}
+        )
+        assert [item["delivery_id"] for item in membership["items"]] == ["delivery-1"]
     finally:
         await query_storage.close()
         await storage.close()
