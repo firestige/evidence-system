@@ -59,6 +59,8 @@ def upgrade() -> None:
         sa.Column("policy_revision", sa.Text(), nullable=False),
         sa.PrimaryKeyConstraint("delivery_id"),
     )
+
+
 def downgrade() -> None:
     op.drop_table("delivery_retirement_fences")
     op.drop_index("ix_delivery_terminal_anchors_recorded", table_name="delivery_terminal_anchors")

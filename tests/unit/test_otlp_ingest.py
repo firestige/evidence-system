@@ -35,12 +35,12 @@ def _kv(name: str, value: str | int | float) -> KeyValue:
     return KeyValue(key=name, value=any_value)
 
 
-def log_request(*records: LogRecord) -> bytes:
+def log_request(*records: LogRecord, service_name: str = "dsh") -> bytes:
     request = ExportLogsServiceRequest(
         resource_logs=[
             ResourceLogs(
                 resource=Resource(
-                    attributes=[_kv("service.name", "dsh"), _kv("service.version", "1")]
+                    attributes=[_kv("service.name", service_name), _kv("service.version", "1")]
                 ),
                 scope_logs=[
                     ScopeLogs(
@@ -336,3 +336,25 @@ async def test_http_otlp_response_is_standard_aggregate_protobuf_without_auth() 
     assert response.status_code == 200
     assert decoded.partial_success.rejected_log_records == 1
     assert "www-authenticate" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_http_accepts_a_conforming_external_producer_without_execution_identity() -> None:
+    storage = MemoryStorage()
+    app = create_app(otlp_ingestor=OtlpIngestor(AdmissionService(storage)))
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://evidence.test"
+    ) as client:
+        response = await client.post(
+            "/v1/logs",
+            content=log_request(
+                sampling_record("event-external-producer"),
+                service_name="third-party-agent",
+            ),
+            headers={"content-type": "application/x-protobuf"},
+        )
+
+    decoded = ExportLogsServiceResponse.FromString(response.content)
+    assert response.status_code == 200
+    assert decoded.partial_success.rejected_log_records == 0
+    assert ("event", "event-external-producer") in storage.state["identities"]
