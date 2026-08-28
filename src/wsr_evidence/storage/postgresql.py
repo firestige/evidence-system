@@ -43,6 +43,27 @@ class PostgresTransaction:
     async def claim_identity(self, record: ValidatedRecord) -> Disposition:
         identity_key = _key_json(record.identity)
         async with self._connection.cursor() as cursor:
+            delivery_id = (
+                str(record.attributes["agentops.delivery.id"])
+                if record.profile_version == "2.0.0"
+                else None
+            )
+            if delivery_id is not None:
+                await cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"delivery:{delivery_id}",),
+                )
+                await cursor.execute(
+                    "SELECT 1 FROM delivery_retirement_fences WHERE delivery_id = %s",
+                    (delivery_id,),
+                )
+                if await cursor.fetchone() is not None:
+                    raise ProjectionPreconditionFailed("Delivery was physically retired")
+                if record.event_name == "task.binding":
+                    await cursor.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                        (f"task:{record.attributes['agentops.task.id']}",),
+                    )
             await cursor.execute(
                 """
                 INSERT INTO accepted_records
@@ -50,13 +71,37 @@ class PostgresTransaction:
                      family_schema, logical_record)
                 VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                 ON CONFLICT (identity_kind, identity_key) DO NOTHING
-                RETURNING canonical_digest
+                RETURNING canonical_digest, accepted_at
                 """,
                 _accepted_record_values(record),
             )
             inserted = await cursor.fetchone()
             if inserted is not None:
                 self._source_identity = (record.identity[0], identity_key)
+                if delivery_id is not None:
+                    await cursor.execute(
+                        """
+                        INSERT INTO delivery_record_memberships
+                            (delivery_id, identity_kind, identity_key)
+                        VALUES (%s, %s, %s)
+                        """,
+                        (delivery_id, record.identity[0], identity_key),
+                    )
+                    if record.event_name == "delivery.summary":
+                        await cursor.execute(
+                            """
+                            INSERT INTO delivery_terminal_anchors
+                                (delivery_id, identity_kind, identity_key, recorded_at)
+                            VALUES (%s, %s, %s, %s)
+                            ON CONFLICT (delivery_id) DO NOTHING
+                            RETURNING delivery_id
+                            """,
+                            (delivery_id, record.identity[0], identity_key, inserted[1]),
+                        )
+                        if await cursor.fetchone() is None:
+                            raise ProjectionConflict(
+                                "Delivery terminal anchor first-write conflict"
+                            )
                 return Disposition.ACCEPTED
             await cursor.execute(
                 """

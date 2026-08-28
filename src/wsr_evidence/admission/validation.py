@@ -658,6 +658,9 @@ def _validate_span(record: dict[str, Any], attributes: dict[str, Any]) -> None:
         "agentops.delivery.id agentops.workflow.id agentops.workflow.version agentops.implementation.id agentops.runtime.id agentops.manifest.digest agentops.workflow.family"
     )
     root_only = root_fields - {"agentops.runtime.id"}
+    if record["profile_version"] == TASK_PROFILE_VERSION:
+        _require("agentops.delivery.id" in attributes, "Profile 2 requires direct Delivery ID")
+        root_only -= {"agentops.delivery.id"}
     if delivery_root:
         _require(root_fields <= set(attributes), "incomplete Delivery root")
         _require(record["span_kind"] == "INTERNAL", "Delivery root must use INTERNAL Span kind")
@@ -715,7 +718,7 @@ def _validate_span(record: dict[str, Any], attributes: dict[str, Any]) -> None:
 def _validate_event(record: dict[str, Any], attributes: dict[str, Any]) -> None:
     event_name = record.get("event_name")
     if record["profile_version"] == TASK_PROFILE_VERSION:
-        _require(event_name == "task.binding", "unknown EventName")
+        _require(event_name in EVENT_NAMES | {"task.binding"}, "unknown EventName")
     else:
         _require(event_name in EVENT_NAMES, "unknown EventName")
     event_name = cast(str, event_name)
@@ -739,6 +742,10 @@ def _validate_event(record: dict[str, Any], attributes: dict[str, Any]) -> None:
         "standard Span attribute on Event",
     )
     allowed, required = EVENT_RULES[event_name]
+    if record["profile_version"] == TASK_PROFILE_VERSION:
+        allowed = allowed | {"agentops.delivery.id"}
+        required = required | {"agentops.delivery.id"}
+        _require("agentops.delivery.id" in attributes, "Profile 2 requires direct Delivery ID")
     disallowed = set(attributes) - allowed
     if disallowed:
         raise ValidationError(f"{sorted(disallowed)[0]} prohibited on {event_name}")

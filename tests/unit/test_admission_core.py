@@ -154,7 +154,7 @@ def test_exact_profile_rejects_unknown_and_sibling_family_fields() -> None:
         validate_record(sibling)
 
 
-def test_profile_two_accepts_only_the_closed_task_binding_carrier() -> None:
+def test_profile_two_accepts_task_binding_and_requires_direct_delivery_on_every_record() -> None:
     validated = validate_record(task_binding_record())
 
     assert validated.profile_version == "2.0.0"
@@ -168,6 +168,14 @@ def test_profile_two_accepts_only_the_closed_task_binding_carrier() -> None:
     disguised["scope"]["version"] = "1.0.0"
     with pytest.raises(ValidationError, match="unknown EventName"):
         validate_record(disguised)
+
+    profile_two_finding = finding_record()
+    profile_two_finding["profile_version"] = "2.0.0"
+    profile_two_finding["scope"]["version"] = "2.0.0"
+    with pytest.raises(ValidationError, match="direct Delivery"):
+        validate_record(profile_two_finding)
+    profile_two_finding["attributes"]["agentops.delivery.id"] = "delivery-1"
+    assert validate_record(profile_two_finding).profile_version == "2.0.0"
 
     whitespace = task_binding_record(display_name=" padded ")
     with pytest.raises(ValidationError, match="task display name"):

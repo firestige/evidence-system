@@ -16,15 +16,24 @@ def project(record: ValidatedRecord) -> tuple[ProjectionEffect, ...]:
         return _bind_event_context(record, _project_finding(record))
     if record.event_name == "role.lineage":
         attributes = record.attributes
+        key = (
+            (
+                attributes["agentops.delivery.id"],
+                attributes["agentops.family.schema"],
+                attributes["agentops.role.id"],
+            )
+            if record.profile_version == "2.0.0"
+            else (
+                attributes["agentops.family.schema"],
+                attributes["agentops.role.id"],
+            )
+        )
         return _bind_event_context(
             record,
             (
                 ProjectionEffect(
                     "role_lineage",
-                    (
-                        attributes["agentops.family.schema"],
-                        attributes["agentops.role.id"],
-                    ),
+                    key,
                     dict(attributes),
                 ),
             ),

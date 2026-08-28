@@ -50,6 +50,19 @@ def test_span_identity_is_trace_and_span_tuple() -> None:
     assert same_span_a.identity != same_span_b.identity
 
 
+def test_profile_two_non_root_span_requires_direct_delivery_identity() -> None:
+    record = span_record(trace_id="1" * 32, span_id="a" * 16)
+    record["profile_version"] = "2.0.0"
+    record["scope"]["version"] = "2.0.0"
+    record["span_name"] = "ordinary child"
+    record["attributes"] = {"agentops.delivery.id": "delivery-1"}
+
+    assert validate_record(record).attributes["agentops.delivery.id"] == "delivery-1"
+    del record["attributes"]["agentops.delivery.id"]
+    with pytest.raises(ValidationError, match="direct Delivery"):
+        validate_record(record)
+
+
 def test_each_span_projects_one_trace_node_without_inferred_causality() -> None:
     record = validate_record(span_record(trace_id="1" * 32, span_id="a" * 16))
 
