@@ -37,3 +37,15 @@ def test_smoke_secrets_are_container_readable_behind_a_private_host_directory() 
     assert 'chmod 700 "$smoke_dir"' in smoke
     assert 'chmod 644 "$smoke_dir"/*-password' in smoke
     assert 'chmod 600 "$smoke_dir"/*-password' not in smoke
+
+
+def test_release_image_is_multi_platform_and_emits_build_provenance() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "--platform linux/amd64,linux/arm64" in workflow
+    assert "--provenance=mode=max" in workflow
+    assert "--sbom=true" in workflow
+    assert "docker buildx imagetools inspect" in workflow
+    assert 'index("amd64") != null and index("arm64") != null' in workflow

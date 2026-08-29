@@ -164,6 +164,9 @@ jobs:
               | jq -er .digest > "$RUNNER_TEMP/oci-digest"
           else
             docker buildx build --push \
+              --platform linux/amd64,linux/arm64 \
+              --provenance=mode=max \
+              --sbom=true \
               --tag "$IMAGE" \
               --build-arg "WSR_RELEASE_REVISION=$RELEASE_TARGET" \
               --metadata-file "$RUNNER_TEMP/image-metadata.json" \
@@ -171,6 +174,11 @@ jobs:
               "$GITHUB_WORKSPACE/evidence-product"
             jq -er '.["containerimage.digest"]' "$RUNNER_TEMP/image-metadata.json" > "$RUNNER_TEMP/oci-digest"
           fi
+          docker buildx imagetools inspect "ghcr.io/firestige/wsr-evidence@$(cat "$RUNNER_TEMP/oci-digest")" \
+            --format '{{json .Manifest}}' > "$RUNNER_TEMP/qualified-image-manifest.json"
+          jq -e '[.manifests[] | select(.platform.os == "linux") | .platform.architecture] |
+            (index("amd64") != null and index("arm64") != null)' \
+            "$RUNNER_TEMP/qualified-image-manifest.json" >/dev/null
 
       - name: Build and verify exact immutable Python assets
         working-directory: evidence-product
