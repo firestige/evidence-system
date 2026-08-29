@@ -27,7 +27,7 @@ def test_python_adapter_configuration_does_not_select_npm() -> None:
 
     assert_configuration(config)
 
-    assert config["repository"] == "firestige/evidence-system"
+    assert config["repository"] == "firestige/wsr-evidence"
     assert config["assetMode"] == "python-wheel-sdist+oci"
     assert config["publisherAdapter"] == "python-github-release+ghcr"
     assert "npm" not in json.dumps(config).lower()
@@ -111,7 +111,7 @@ def test_workflows_separate_product_authority_from_publisher_and_scope_release_i
     )
     assert "permission-contents: write" in candidate
     assert "permission-workflows: write" in candidate
-    assert "repositories: evidence-system" in candidate
+    assert "repositories: wsr-evidence" in candidate
     release_commands = [
         line
         for line in candidate.splitlines()
@@ -139,7 +139,7 @@ def test_workflows_separate_product_authority_from_publisher_and_scope_release_i
         "Verify qualified assets"
     )
     assert "GH_TOKEN: ${{ steps.release-app-token.outputs.token }}" in promote
-    assert "repositories: evidence-system" in promote
+    assert "repositories: wsr-evidence" in promote
     assert "permission-contents: write" in promote
     assert "permission-workflows: write" in promote
     promote_release_commands = [

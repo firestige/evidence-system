@@ -46,7 +46,7 @@ git clone --recurse-submodules https://github.com/firestige/workflow-self-recurs
 To clone it standalone:
 
 ```sh
-git clone https://github.com/firestige/evidence-system.git
+git clone https://github.com/firestige/wsr-evidence.git
 ```
 
 ## Documentation

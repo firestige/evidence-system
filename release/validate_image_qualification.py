@@ -8,7 +8,7 @@ from typing import Any
 
 PLATFORMS = {"linux/amd64", "linux/arm64"}
 BUILD_TYPE = "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md"
-SOURCE = "https://github.com/firestige/evidence-system"
+SOURCE = "https://github.com/firestige/wsr-evidence"
 
 
 class QualificationError(RuntimeError):
