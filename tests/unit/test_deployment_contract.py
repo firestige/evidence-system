@@ -51,6 +51,11 @@ def test_release_image_is_multi_platform_and_emits_build_provenance() -> None:
     assert "--sbom=true" in workflow
     assert "docker buildx imagetools inspect" in workflow
     assert 'index("amd64") != null and index("arm64") != null' in workflow
+    assert "release/validate_image_qualification.py" in workflow
+    assert "--format '{{json .Image}}'" in workflow
+    assert "--format '{{json .Provenance}}'" in workflow
+    assert '--product-commit "$RELEASE_TARGET"' in workflow
+    assert ".config.Labels" not in workflow
 
 
 def test_release_trigger_gate_has_a_closed_event_and_ref_truth_table() -> None:
@@ -77,3 +82,14 @@ def test_release_workflow_delegates_to_the_tested_trigger_gate() -> None:
 
     assert "release/cli/verify-trigger.sh" in workflow
     assert 'test "$GITHUB_REF_NAME" = "release/next"' not in workflow
+
+
+def test_release_workflow_uses_tooling_from_its_exact_publisher_revision() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert workflow.count("ref: ${{ github.workflow_sha }}") >= 2
+    assert "PUBLISHER_REVISION: ${{ github.workflow_sha }}" in workflow
+    assert 'git -C release-publisher rev-parse HEAD)" = "$PUBLISHER_REVISION"' in workflow
+    assert '"publisherRevision":os.environ["PUBLISHER_REVISION"]' in workflow
