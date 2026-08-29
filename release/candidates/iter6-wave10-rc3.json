@@ -1,0 +1,59 @@
+{
+  "schema_version": "wsr.evidence-immutable-candidate@1.0.0",
+  "status": "IMMUTABLE_RELEASE_CANDIDATE",
+  "created_at": "2026-08-29",
+  "candidate_tag": "0.1.0-rc.3",
+  "evidence": {
+    "version": "0.1.0",
+    "payload_commit": "7e3ff4a9f87b17b428a07054ff9826aeb863b57f",
+    "candidate_archive_commit": "35d63469650e978d0fb795419df5d4a0ea5eafa7",
+    "publisher_base_commit": "ed99e871a2a3ec4a4a4019ad6a40ac56fbde91b6",
+    "migration_revision": "20260828_0004"
+  },
+  "pinned_inputs": {
+    "system_contracts_commit": "a3f6d7ca8a3e08e89af4bc3ecea34524f5094bd5",
+    "contract_publication_record_sha256": "sha256:feb0186da48661d2663b03d20e536f470b591ea22f21a34a4ca99bfcc33204e9"
+  },
+  "contract": {
+    "coordinate": "evidence.query@0.1.0",
+    "status": "FROZEN",
+    "published": true,
+    "conformance_claim": "VALIDATOR_ONLY",
+    "semantic_sha256": "sha256:ce13b76cb3c2737e8243c97de880574060a61c05a6a7a67182a2804c04a2a8ef"
+  },
+  "deployment": {
+    "target": "local-compose-loopback-only",
+    "api_binding": "127.0.0.1:4318",
+    "postgres_host_port": null,
+    "presentation_services": [],
+    "compose_sha256": "sha256:877a2a0ffdb2fa5c6eed2367d31faf6ecd14d84a7177f76208a462138ba34cc4",
+    "smoke_sha256": "sha256:9305f2f346b38dd2c3813c4747562fd0fb8a37b8d8fdddbbdc47032217ff0aba"
+  },
+  "assets": [
+    {
+      "name": "wsr_evidence-0.1.0-py3-none-any.whl",
+      "bytes": 55732,
+      "sha256": "sha256:1cc5587fea69ba5efb4b77e3824878b3ce2caa9780c1a9c1ff8e37fe01f2408f"
+    },
+    {
+      "name": "wsr_evidence-0.1.0.tar.gz",
+      "bytes": 43873,
+      "sha256": "sha256:b2e1458dd511403d002b303e57de155bd4cd84dcbba9467db020c04aa29490e8"
+    }
+  ],
+  "gates": {
+    "python_3_14_unit": "PASS_138",
+    "postgresql_18_4_migrations_and_integration": "PASS_16",
+    "compose_backup_restore": "PASS",
+    "task_route_and_schema": "PASS",
+    "artifact_digest_rebuild": "BYTE_EXACT",
+    "publisher_platform_qualification": "PASS_9",
+    "contract_frozen_authority": "PASS"
+  },
+  "non_claims": [
+    "NO_EVIDENCE_TAG_OR_GITHUB_RELEASE_CREATED",
+    "NO_EVIDENCE_REGISTRY_OR_GHCR_PUBLICATION_CREATED",
+    "NO_STABLE_COMPONENT_OR_SUPERPROJECT_PUBLICATION_CREATED",
+    "NO_IMPLEMENTATION_CONFORMANCE_CLAIM"
+  ]
+}
