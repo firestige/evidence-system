@@ -1,6 +1,6 @@
 {
   "schemaVersion": "wsr.release-component@1.0.0",
-  "repository": "firestige/evidence-system",
+  "repository": "firestige/wsr-evidence",
   "releaseBranch": "main",
   "triggerBranch": "release/next",
   "assetMode": "python-wheel-sdist+oci",

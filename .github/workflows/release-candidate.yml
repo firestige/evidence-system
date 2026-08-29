@@ -46,7 +46,7 @@ jobs:
       - name: Checkout exact publisher trigger gate
         uses: actions/checkout@v6
         with:
-          repository: firestige/evidence-system
+          repository: firestige/wsr-evidence
           ref: ${{ github.workflow_sha }}
           path: publisher-trigger-gate
 
@@ -105,7 +105,7 @@ jobs:
       - name: Checkout exact Evidence product candidate
         uses: actions/checkout@v6
         with:
-          repository: firestige/evidence-system
+          repository: firestige/wsr-evidence
           ref: ${{ steps.authority.outputs.product_commit }}
           fetch-depth: 0
           path: evidence-product
@@ -113,7 +113,7 @@ jobs:
       - name: Checkout exact publisher tooling revision
         uses: actions/checkout@v6
         with:
-          repository: firestige/evidence-system
+          repository: firestige/wsr-evidence
           ref: ${{ github.workflow_sha }}
           path: release-publisher
 
@@ -214,7 +214,7 @@ jobs:
           app-id: ${{ vars.WSR_RELEASE_APP_ID }}
           private-key: ${{ secrets.WSR_RELEASE_APP_PRIVATE_KEY }}
           owner: firestige
-          repositories: evidence-system
+          repositories: wsr-evidence
           permission-contents: write
           permission-workflows: write
 

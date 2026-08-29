@@ -9,7 +9,7 @@
               "request": {
                 "args": {
                   "build-arg:WSR_RELEASE_REVISION": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                  "vcs:source": "https://github.com/firestige/evidence-system",
+                  "vcs:source": "https://github.com/firestige/wsr-evidence",
                   "vcs:revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 }
               }
@@ -29,7 +29,7 @@
               "request": {
                 "args": {
                   "build-arg:WSR_RELEASE_REVISION": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                  "vcs:source": "https://github.com/firestige/evidence-system",
+                  "vcs:source": "https://github.com/firestige/wsr-evidence",
                   "vcs:revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 }
               }
