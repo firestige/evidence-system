@@ -1,3 +1,5 @@
+import os
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).parents[2]
@@ -49,3 +51,29 @@ def test_release_image_is_multi_platform_and_emits_build_provenance() -> None:
     assert "--sbom=true" in workflow
     assert "docker buildx imagetools inspect" in workflow
     assert 'index("amd64") != null and index("arm64") != null' in workflow
+
+
+def test_release_trigger_gate_has_a_closed_event_and_ref_truth_table() -> None:
+    gate = ROOT / "release" / "cli" / "verify-trigger.sh"
+    allowed = {("push", "release/next"), ("workflow_dispatch", "main")}
+    events = ("push", "workflow_dispatch", "pull_request", "workflow_call")
+    refs = ("release/next", "main", "feature/untrusted")
+
+    for event in events:
+        for ref in refs:
+            completed = subprocess.run(
+                [str(gate)],
+                env=os.environ | {"GITHUB_EVENT_NAME": event, "GITHUB_REF_NAME": ref},
+                capture_output=True,
+                text=True,
+            )
+            assert (completed.returncode == 0) is ((event, ref) in allowed), (event, ref)
+
+
+def test_release_workflow_delegates_to_the_tested_trigger_gate() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "release/cli/verify-trigger.sh" in workflow
+    assert 'test "$GITHUB_REF_NAME" = "release/next"' not in workflow

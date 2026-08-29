@@ -43,8 +43,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Verify release trigger branch
-        run: test "$GITHUB_REF_NAME" = "release/next"
+      - name: Checkout exact publisher trigger gate
+        uses: actions/checkout@v6
+        with:
+          repository: firestige/evidence-system
+          ref: ${{ github.workflow_sha }}
+          path: publisher-trigger-gate
+
+      - name: Verify release trigger event and ref
+        run: publisher-trigger-gate/release/cli/verify-trigger.sh
 
       - name: Resolve immutable release request
         id: request
