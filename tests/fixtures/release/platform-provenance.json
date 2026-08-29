@@ -1,0 +1,42 @@
+{
+  "linux/amd64": {
+    "SLSA": {
+      "buildDefinition": {
+        "buildType": "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md",
+        "externalParameters": {
+          "request": {
+            "root": {
+              "request": {
+                "args": {
+                  "build-arg:WSR_RELEASE_REVISION": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "vcs:source": "https://github.com/firestige/evidence-system",
+                  "vcs:revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "linux/arm64": {
+    "SLSA": {
+      "buildDefinition": {
+        "buildType": "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md",
+        "externalParameters": {
+          "request": {
+            "root": {
+              "request": {
+                "args": {
+                  "build-arg:WSR_RELEASE_REVISION": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "vcs:source": "https://github.com/firestige/evidence-system",
+                  "vcs:revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

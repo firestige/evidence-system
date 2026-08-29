@@ -1,0 +1,18 @@
+{
+  "linux/amd64": {
+    "config": {
+      "Labels": {
+        "org.opencontainers.image.source": "https://github.com/firestige/evidence-system",
+        "org.opencontainers.image.revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  },
+  "linux/arm64": {
+    "config": {
+      "Labels": {
+        "org.opencontainers.image.source": "https://github.com/firestige/evidence-system",
+        "org.opencontainers.image.revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  }
+}
