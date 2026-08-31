@@ -202,6 +202,53 @@ def test_task_binding_family_comes_from_the_manifest_workflow_without_an_allowli
         validate_record(mismatched)
 
 
+def test_task_binding_accepts_the_complete_frozen_provider_role_projection() -> None:
+    record = task_binding_record(workflow_id="hello-world-workflow")
+    projection = json.loads(record["attributes"]["agentops.delivery.manifest_projection"])
+    resolved_role = {
+        "roleId": "role.greeter",
+        "rolePromptIdentity": "resource.role-prompt.greeter",
+        "rolePromptDigest": f"sha256:{'1' * 64}",
+        "agentProviderId": "provider.copilot",
+        "agentProviderVersion": "1.0.78",
+        "agentProviderAdapterKey": "copilot-sdk",
+        "agentProviderDescriptorDigest": f"sha256:{'2' * 64}",
+        "requiredCapabilities": ["structured-completion"],
+        "modelProviderId": "github-copilot",
+        "modelId": "gpt-5.3-codex",
+        "resolutionSource": "REPOSITORY",
+    }
+    projection["roles"] = [
+        {
+            "role_id": resolved_role["roleId"],
+            "role_prompt_identity": resolved_role["rolePromptIdentity"],
+            "role_prompt_digest": resolved_role["rolePromptDigest"],
+            "agent_provider_id": resolved_role["agentProviderId"],
+            "agent_provider_version": resolved_role["agentProviderVersion"],
+            "agent_provider_adapter_key": resolved_role["agentProviderAdapterKey"],
+            "agent_provider_descriptor_digest": resolved_role[
+                "agentProviderDescriptorDigest"
+            ],
+            "required_capabilities": resolved_role["requiredCapabilities"],
+            "model_provider_id": resolved_role["modelProviderId"],
+            "model_id": resolved_role["modelId"],
+            "resolution_source": resolved_role["resolutionSource"],
+        }
+    ]
+    projection["repository_model_bindings"]["resolved_map_digest"] = (
+        f"sha256:{sha256(canonical_bytes([resolved_role])).hexdigest()}"
+    )
+    encoded = canonical_bytes(projection).decode()
+    record["attributes"]["agentops.delivery.manifest_projection"] = encoded
+    record["attributes"]["agentops.delivery.manifest_projection_digest"] = sha256(
+        encoded.encode()
+    ).hexdigest()
+
+    validated = validate_record(record)
+
+    assert validated.attributes["agentops.task.id"] == "task-1"
+
+
 def test_task_binding_projects_atomic_identity_membership_guard_and_optional_name() -> None:
     named = AdmissionService.project(validate_record(task_binding_record()))
     unnamed = AdmissionService.project(validate_record(task_binding_record(display_name=None)))
@@ -296,18 +343,26 @@ def test_task_binding_accepts_present_repository_and_exact_sorted_role_map() -> 
         {
             "role_id": "role.reviewer",
             "role_prompt_identity": "prompt.role.reviewer",
-            "role_prompt_digest": f"sha256:{'d' * 64}",
-            "agent_provider_id": "provider.dsh",
-            "model_provider_id": "deepseek-official",
+                "role_prompt_digest": f"sha256:{'d' * 64}",
+                "agent_provider_id": "provider.dsh",
+                "agent_provider_version": "1.2.3",
+                "agent_provider_adapter_key": "dsh-sdk",
+                "agent_provider_descriptor_digest": f"sha256:{'1' * 64}",
+                "required_capabilities": ["structured-completion"],
+                "model_provider_id": "deepseek-official",
             "model_id": "deepseek-chat",
             "resolution_source": "EXECUTION_DEFAULT",
         },
         {
             "role_id": "role.writer",
             "role_prompt_identity": "prompt.role.writer",
-            "role_prompt_digest": f"sha256:{'e' * 64}",
-            "agent_provider_id": "provider.dsh",
-            "model_provider_id": "deepseek-official",
+                "role_prompt_digest": f"sha256:{'e' * 64}",
+                "agent_provider_id": "provider.dsh",
+                "agent_provider_version": "1.2.3",
+                "agent_provider_adapter_key": "dsh-sdk",
+                "agent_provider_descriptor_digest": f"sha256:{'1' * 64}",
+                "required_capabilities": ["structured-completion"],
+                "model_provider_id": "deepseek-official",
             "model_id": "deepseek-reasoner",
             "resolution_source": "REPOSITORY",
         },
@@ -316,9 +371,15 @@ def test_task_binding_accepts_present_repository_and_exact_sorted_role_map() -> 
         {
             "roleId": role["role_id"],
             "rolePromptIdentity": role["role_prompt_identity"],
-            "rolePromptDigest": role["role_prompt_digest"],
-            "agentProviderId": role["agent_provider_id"],
-            "modelProviderId": role["model_provider_id"],
+                "rolePromptDigest": role["role_prompt_digest"],
+                "agentProviderId": role["agent_provider_id"],
+                "agentProviderVersion": role["agent_provider_version"],
+                "agentProviderAdapterKey": role["agent_provider_adapter_key"],
+                "agentProviderDescriptorDigest": role[
+                    "agent_provider_descriptor_digest"
+                ],
+                "requiredCapabilities": role["required_capabilities"],
+                "modelProviderId": role["model_provider_id"],
             "modelId": role["model_id"],
             "resolutionSource": role["resolution_source"],
         }

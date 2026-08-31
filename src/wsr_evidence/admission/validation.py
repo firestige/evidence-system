@@ -275,6 +275,11 @@ NANOSECONDS = re.compile(r"^(0|[1-9][0-9]{0,19})$")
 PREFIXED_DIGEST = re.compile(r"^sha256:[a-f0-9]{64}$")
 PACKAGE_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
 VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+PROVIDER_VERSION = re.compile(
+    r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
 
 
 class ValidationError(ValueError):
@@ -535,18 +540,23 @@ def _parse_closed_manifest_projection(attributes: dict[str, Any]) -> dict[str, A
         "role_prompt_identity",
         "role_prompt_digest",
         "agent_provider_id",
+        "agent_provider_version",
+        "agent_provider_adapter_key",
+        "agent_provider_descriptor_digest",
+        "required_capabilities",
         "model_provider_id",
         "model_id",
         "resolution_source",
     }
     previous: str | None = None
-    resolved_roles: list[dict[str, str]] = []
+    resolved_roles: list[dict[str, Any]] = []
     for value_role in roles:
         role = _closed_object(value_role, role_keys, "invalid Manifest Role shape")
         for name in (
             "role_id",
             "role_prompt_identity",
             "agent_provider_id",
+            "agent_provider_adapter_key",
             "model_provider_id",
             "model_id",
         ):
@@ -558,6 +568,29 @@ def _parse_closed_manifest_projection(attributes: dict[str, Any]) -> dict[str, A
             isinstance(role["role_prompt_digest"], str)
             and PREFIXED_DIGEST.fullmatch(role["role_prompt_digest"]) is not None,
             "invalid Role prompt digest",
+        )
+        _require(
+            isinstance(role["agent_provider_version"], str)
+            and PROVIDER_VERSION.fullmatch(role["agent_provider_version"]) is not None,
+            "invalid Agent Provider version",
+        )
+        _require(
+            isinstance(role["agent_provider_descriptor_digest"], str)
+            and PREFIXED_DIGEST.fullmatch(role["agent_provider_descriptor_digest"])
+            is not None,
+            "invalid Agent Provider descriptor digest",
+        )
+        capabilities = role["required_capabilities"]
+        _require(
+            isinstance(capabilities, list)
+            and len(capabilities) > 0
+            and all(
+                isinstance(capability, str)
+                and IDENTIFIER.fullmatch(capability) is not None
+                for capability in capabilities
+            )
+            and capabilities == sorted(set(capabilities)),
+            "invalid required capability collection",
         )
         _require(
             role["resolution_source"] in {"REPOSITORY", "EXECUTION_DEFAULT"},
@@ -572,6 +605,12 @@ def _parse_closed_manifest_projection(attributes: dict[str, Any]) -> dict[str, A
                 "rolePromptIdentity": cast(str, role["role_prompt_identity"]),
                 "rolePromptDigest": cast(str, role["role_prompt_digest"]),
                 "agentProviderId": cast(str, role["agent_provider_id"]),
+                "agentProviderVersion": cast(str, role["agent_provider_version"]),
+                "agentProviderAdapterKey": cast(str, role["agent_provider_adapter_key"]),
+                "agentProviderDescriptorDigest": cast(
+                    str, role["agent_provider_descriptor_digest"]
+                ),
+                "requiredCapabilities": cast(list[str], capabilities),
                 "modelProviderId": cast(str, role["model_provider_id"]),
                 "modelId": cast(str, role["model_id"]),
                 "resolutionSource": cast(str, role["resolution_source"]),
