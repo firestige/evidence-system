@@ -160,10 +160,7 @@ def _project_span(record: ValidatedRecord) -> tuple[ProjectionEffect, ...]:
     logical = record.logical
     effects: list[ProjectionEffect] = []
     if logical["span_name"].startswith("invoke_workflow"):
-        family_schema = {
-            "implementation": "implementation@1",
-            "system-design": "system-design@1",
-        }[str(record.attributes["agentops.workflow.family"])]
+        workflow_family = str(record.attributes["agentops.workflow.family"])
         effects.append(
             ProjectionEffect(
                 "delivery_root_binding",
@@ -172,8 +169,8 @@ def _project_span(record: ValidatedRecord) -> tuple[ProjectionEffect, ...]:
                     "delivery_id": record.attributes["agentops.delivery.id"],
                     "runtime_id": record.attributes["agentops.runtime.id"],
                     "manifest_digest": record.attributes["agentops.manifest.digest"],
-                    "family_schema": family_schema,
-                    "workflow_family": record.attributes["agentops.workflow.family"],
+                    "family_schema": f"{workflow_family}@1",
+                    "workflow_family": workflow_family,
                 },
             )
         )
