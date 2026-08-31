@@ -76,6 +76,17 @@ def test_each_span_projects_one_trace_node_without_inferred_causality() -> None:
     assert all(effect.kind != "trace_parent_edge" for effect in effects)
 
 
+def test_delivery_root_binding_derives_schema_from_any_workflow_family() -> None:
+    logical = span_record(trace_id="1" * 32, span_id="a" * 16)
+    logical["attributes"]["agentops.workflow.family"] = "hello-world-workflow"
+
+    effects = AdmissionService.project(validate_record(logical))
+
+    root = next(effect for effect in effects if effect.kind == "delivery_root_binding")
+    assert root.payload["workflow_family"] == "hello-world-workflow"
+    assert root.payload["family_schema"] == "hello-world-workflow@1"
+
+
 def test_model_attribution_projects_only_the_exact_owner_supplied_tuple() -> None:
     record = span_record(trace_id="1" * 32, span_id="a" * 16)
     record["span_name"] = "chat provider"

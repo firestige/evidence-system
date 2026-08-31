@@ -57,7 +57,10 @@ def finding_record(*, event_id: str = "event-1", target_id: str = "artifact-1") 
 
 
 def task_binding_record(
-    *, display_name: str | None = "Token tuning", task_id: str = "task-1"
+    *,
+    display_name: str | None = "Token tuning",
+    task_id: str = "task-1",
+    workflow_id: str = "hello-world-workflow",
 ) -> dict[str, Any]:
     roles: list[dict[str, str]] = []
     projection = {
@@ -66,10 +69,10 @@ def task_binding_record(
         "task_id": task_id,
         "manifest_digest": "a" * 64,
         "workflow": {
-            "package_name": "implementation",
+            "package_name": workflow_id,
             "exact_package_version": "2.0.0",
             "package_digest": f"sha256:{'b' * 64}",
-            "workflow_id": "workflow.implementation",
+            "workflow_id": workflow_id,
             "workflow_version": "2.0.0",
             "snapshot_id": "snapshot.implementation.2",
             "snapshot_digest": f"sha256:{'c' * 64}",
@@ -86,6 +89,8 @@ def task_binding_record(
         "agentops.task.id": task_id,
         "agentops.manifest.digest": "a" * 64,
         "agentops.event.id": f"task-binding-{sha256(b'delivery-1').hexdigest()[:24]}",
+        "agentops.workflow.family": workflow_id,
+        "agentops.family.schema": f"{workflow_id}@1",
         "agentops.delivery.manifest_projection": projection_json,
         "agentops.delivery.manifest_projection_digest": sha256(
             projection_json.encode()
@@ -186,6 +191,64 @@ def test_profile_two_accepts_task_binding_and_requires_direct_delivery_on_every_
             validate_record(task_binding_record(task_id=invalid_task_id))
 
 
+def test_task_binding_family_comes_from_the_manifest_workflow_without_an_allowlist() -> None:
+    validated = validate_record(task_binding_record(workflow_id="hello-world-workflow"))
+
+    assert validated.attributes["agentops.workflow.family"] == "hello-world-workflow"
+    assert validated.attributes["agentops.family.schema"] == "hello-world-workflow@1"
+
+    mismatched = task_binding_record(workflow_id="hello-world-workflow")
+    mismatched["attributes"]["agentops.workflow.family"] = "implementation-workflow"
+    mismatched["attributes"]["agentops.family.schema"] = "implementation-workflow@1"
+    with pytest.raises(ValidationError, match="Manifest Workflow family"):
+        validate_record(mismatched)
+
+
+def test_task_binding_accepts_the_complete_frozen_provider_role_projection() -> None:
+    record = task_binding_record(workflow_id="hello-world-workflow")
+    projection = json.loads(record["attributes"]["agentops.delivery.manifest_projection"])
+    resolved_role = {
+        "roleId": "role.greeter",
+        "rolePromptIdentity": "resource.role-prompt.greeter",
+        "rolePromptDigest": f"sha256:{'1' * 64}",
+        "agentProviderId": "provider.copilot",
+        "agentProviderVersion": "1.0.78",
+        "agentProviderAdapterKey": "copilot-sdk",
+        "agentProviderDescriptorDigest": f"sha256:{'2' * 64}",
+        "requiredCapabilities": ["structured-completion"],
+        "modelProviderId": "github-copilot",
+        "modelId": "gpt-5.3-codex",
+        "resolutionSource": "REPOSITORY",
+    }
+    projection["roles"] = [
+        {
+            "role_id": resolved_role["roleId"],
+            "role_prompt_identity": resolved_role["rolePromptIdentity"],
+            "role_prompt_digest": resolved_role["rolePromptDigest"],
+            "agent_provider_id": resolved_role["agentProviderId"],
+            "agent_provider_version": resolved_role["agentProviderVersion"],
+            "agent_provider_adapter_key": resolved_role["agentProviderAdapterKey"],
+            "agent_provider_descriptor_digest": resolved_role["agentProviderDescriptorDigest"],
+            "required_capabilities": resolved_role["requiredCapabilities"],
+            "model_provider_id": resolved_role["modelProviderId"],
+            "model_id": resolved_role["modelId"],
+            "resolution_source": resolved_role["resolutionSource"],
+        }
+    ]
+    projection["repository_model_bindings"]["resolved_map_digest"] = (
+        f"sha256:{sha256(canonical_bytes([resolved_role])).hexdigest()}"
+    )
+    encoded = canonical_bytes(projection).decode()
+    record["attributes"]["agentops.delivery.manifest_projection"] = encoded
+    record["attributes"]["agentops.delivery.manifest_projection_digest"] = sha256(
+        encoded.encode()
+    ).hexdigest()
+
+    validated = validate_record(record)
+
+    assert validated.attributes["agentops.task.id"] == "task-1"
+
+
 def test_task_binding_projects_atomic_identity_membership_guard_and_optional_name() -> None:
     named = AdmissionService.project(validate_record(task_binding_record()))
     unnamed = AdmissionService.project(validate_record(task_binding_record(display_name=None)))
@@ -282,6 +345,10 @@ def test_task_binding_accepts_present_repository_and_exact_sorted_role_map() -> 
             "role_prompt_identity": "prompt.role.reviewer",
             "role_prompt_digest": f"sha256:{'d' * 64}",
             "agent_provider_id": "provider.dsh",
+            "agent_provider_version": "1.2.3",
+            "agent_provider_adapter_key": "dsh-sdk",
+            "agent_provider_descriptor_digest": f"sha256:{'1' * 64}",
+            "required_capabilities": ["structured-completion"],
             "model_provider_id": "deepseek-official",
             "model_id": "deepseek-chat",
             "resolution_source": "EXECUTION_DEFAULT",
@@ -291,6 +358,10 @@ def test_task_binding_accepts_present_repository_and_exact_sorted_role_map() -> 
             "role_prompt_identity": "prompt.role.writer",
             "role_prompt_digest": f"sha256:{'e' * 64}",
             "agent_provider_id": "provider.dsh",
+            "agent_provider_version": "1.2.3",
+            "agent_provider_adapter_key": "dsh-sdk",
+            "agent_provider_descriptor_digest": f"sha256:{'1' * 64}",
+            "required_capabilities": ["structured-completion"],
             "model_provider_id": "deepseek-official",
             "model_id": "deepseek-reasoner",
             "resolution_source": "REPOSITORY",
@@ -302,6 +373,10 @@ def test_task_binding_accepts_present_repository_and_exact_sorted_role_map() -> 
             "rolePromptIdentity": role["role_prompt_identity"],
             "rolePromptDigest": role["role_prompt_digest"],
             "agentProviderId": role["agent_provider_id"],
+            "agentProviderVersion": role["agent_provider_version"],
+            "agentProviderAdapterKey": role["agent_provider_adapter_key"],
+            "agentProviderDescriptorDigest": role["agent_provider_descriptor_digest"],
+            "requiredCapabilities": role["required_capabilities"],
             "modelProviderId": role["model_provider_id"],
             "modelId": role["model_id"],
             "resolutionSource": role["resolution_source"],
@@ -375,7 +450,7 @@ def test_task_binding_persists_its_exact_profile_coordinate() -> None:
     assert values[3] == "2.0.0"
 
 
-def test_family_specific_summary_and_fresh_reader_shapes_are_closed() -> None:
+def test_event_shapes_are_closed_without_a_workflow_family_allowlist() -> None:
     implementation = {
         "profile_version": "1.0.0",
         "record_type": "event",
@@ -388,8 +463,8 @@ def test_family_specific_summary_and_fresh_reader_shapes_are_closed() -> None:
         },
         "attributes": {
             "agentops.event.id": "implementation-1",
-            "agentops.workflow.family": "system-design",
-            "agentops.family.schema": "system-design@1",
+            "agentops.workflow.family": "hello-world-workflow",
+            "agentops.family.schema": "hello-world-workflow@1",
             "agentops.summary.state": "FINAL",
             "agentops.artifact.id": "report-1",
             "agentops.artifact.digest": "a" * 64,
@@ -401,8 +476,15 @@ def test_family_specific_summary_and_fresh_reader_shapes_are_closed() -> None:
             "agentops.coverage.format": "coverage-json",
         },
     }
-    with pytest.raises(ValidationError, match="family-specific EventName"):
-        validate_record(implementation)
+    assert (
+        validate_record(implementation).attributes["agentops.workflow.family"]
+        == "hello-world-workflow"
+    )
+
+    mismatched = deepcopy(implementation)
+    mismatched["attributes"]["agentops.family.schema"] = "different-workflow@1"
+    with pytest.raises(ValidationError, match="family/schema mismatch"):
+        validate_record(mismatched)
 
     fresh_reader = finding_record()
     fresh_reader["event_name"] = "review.summary"

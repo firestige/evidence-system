@@ -142,7 +142,6 @@ FIELD_TYPES = {
     **{name: "number" for name in NUMBER_FIELDS},
 }
 ENUMS = {
-    "agentops.workflow.family": {"implementation", "system-design"},
     "agentops.delivery.outcome": {"COMPLETED", "INCOMPLETE", "FAILED", "CANCELLED", "START_FAILED"},
     "agentops.summary.state": {"FINAL", "LOWER_BOUND", "NOT_APPLICABLE", "UNAVAILABLE"},
     "agentops.review.lens": {
@@ -165,7 +164,6 @@ ENUMS = {
     },
     "agentops.usage.source": {"runtime", "provider"},
     "agentops.sampling.decision": {"RECORD_AND_SAMPLE", "DROP"},
-    "agentops.family.schema": {"implementation@1", "system-design@1"},
     "agentops.finding.target.kind": {"ARTIFACT", "SECTION", "COMPONENT", "REQUIREMENT"},
     "agentops.coverage.dimension": {"line", "branch", "function"},
     "agentops.fresh_reader.result": {"PASS", "FINDINGS_REPORTED"},
@@ -180,10 +178,10 @@ def _set(value: str) -> set[str]:
 EVENT_RULES = {
     "task.binding": (
         _set(
-            "agentops.delivery.id agentops.task.id agentops.manifest.digest agentops.event.id agentops.task.display_name agentops.delivery.manifest_projection agentops.delivery.manifest_projection_digest"
+            "agentops.delivery.id agentops.task.id agentops.manifest.digest agentops.workflow.family agentops.event.id agentops.task.display_name agentops.family.schema agentops.delivery.manifest_projection agentops.delivery.manifest_projection_digest"
         ),
         _set(
-            "agentops.delivery.id agentops.task.id agentops.manifest.digest agentops.event.id agentops.delivery.manifest_projection agentops.delivery.manifest_projection_digest"
+            "agentops.delivery.id agentops.task.id agentops.manifest.digest agentops.workflow.family agentops.event.id agentops.family.schema agentops.delivery.manifest_projection agentops.delivery.manifest_projection_digest"
         ),
     ),
     "delivery.summary": (
@@ -277,6 +275,11 @@ NANOSECONDS = re.compile(r"^(0|[1-9][0-9]{0,19})$")
 PREFIXED_DIGEST = re.compile(r"^sha256:[a-f0-9]{64}$")
 PACKAGE_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
 VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+PROVIDER_VERSION = re.compile(
+    r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
 
 
 class ValidationError(ValueError):
@@ -400,6 +403,18 @@ def _validate_attributes(attributes: dict[str, Any]) -> None:
             _require(math.isfinite(value), f"non-finite {name}")
         if name in ENUMS:
             _require(value in ENUMS[name], f"invalid enum for {name}")
+        if name == "agentops.workflow.family":
+            _require(
+                isinstance(value, str) and IDENTIFIER.fullmatch(value) is not None,
+                "invalid Workflow family",
+            )
+        if name == "agentops.family.schema":
+            _require(
+                isinstance(value, str)
+                and value.endswith("@1")
+                and IDENTIFIER.fullmatch(value[:-2]) is not None,
+                "invalid Workflow family schema",
+            )
         if name in {
             "agentops.manifest.digest",
             "agentops.artifact.digest",
@@ -525,18 +540,23 @@ def _parse_closed_manifest_projection(attributes: dict[str, Any]) -> dict[str, A
         "role_prompt_identity",
         "role_prompt_digest",
         "agent_provider_id",
+        "agent_provider_version",
+        "agent_provider_adapter_key",
+        "agent_provider_descriptor_digest",
+        "required_capabilities",
         "model_provider_id",
         "model_id",
         "resolution_source",
     }
     previous: str | None = None
-    resolved_roles: list[dict[str, str]] = []
+    resolved_roles: list[dict[str, Any]] = []
     for value_role in roles:
         role = _closed_object(value_role, role_keys, "invalid Manifest Role shape")
         for name in (
             "role_id",
             "role_prompt_identity",
             "agent_provider_id",
+            "agent_provider_adapter_key",
             "model_provider_id",
             "model_id",
         ):
@@ -548,6 +568,27 @@ def _parse_closed_manifest_projection(attributes: dict[str, Any]) -> dict[str, A
             isinstance(role["role_prompt_digest"], str)
             and PREFIXED_DIGEST.fullmatch(role["role_prompt_digest"]) is not None,
             "invalid Role prompt digest",
+        )
+        _require(
+            isinstance(role["agent_provider_version"], str)
+            and PROVIDER_VERSION.fullmatch(role["agent_provider_version"]) is not None,
+            "invalid Agent Provider version",
+        )
+        _require(
+            isinstance(role["agent_provider_descriptor_digest"], str)
+            and PREFIXED_DIGEST.fullmatch(role["agent_provider_descriptor_digest"]) is not None,
+            "invalid Agent Provider descriptor digest",
+        )
+        capabilities = role["required_capabilities"]
+        _require(
+            isinstance(capabilities, list)
+            and len(capabilities) > 0
+            and all(
+                isinstance(capability, str) and IDENTIFIER.fullmatch(capability) is not None
+                for capability in capabilities
+            )
+            and capabilities == sorted(set(capabilities)),
+            "invalid required capability collection",
         )
         _require(
             role["resolution_source"] in {"REPOSITORY", "EXECUTION_DEFAULT"},
@@ -562,6 +603,12 @@ def _parse_closed_manifest_projection(attributes: dict[str, Any]) -> dict[str, A
                 "rolePromptIdentity": cast(str, role["role_prompt_identity"]),
                 "rolePromptDigest": cast(str, role["role_prompt_digest"]),
                 "agentProviderId": cast(str, role["agent_provider_id"]),
+                "agentProviderVersion": cast(str, role["agent_provider_version"]),
+                "agentProviderAdapterKey": cast(str, role["agent_provider_adapter_key"]),
+                "agentProviderDescriptorDigest": cast(
+                    str, role["agent_provider_descriptor_digest"]
+                ),
+                "requiredCapabilities": cast(list[str], capabilities),
                 "modelProviderId": cast(str, role["model_provider_id"]),
                 "modelId": cast(str, role["model_id"]),
                 "resolutionSource": cast(str, role["resolution_source"]),
@@ -760,19 +807,21 @@ def _validate_event(record: dict[str, Any], attributes: dict[str, Any]) -> None:
             "task-binding-" + sha256(attributes["agentops.delivery.id"].encode()).hexdigest()[:24]
         )
         _require(attributes["agentops.event.id"] == expected_event_id, "unstable task binding id")
-        _parse_closed_manifest_projection(attributes)
+        projection = _parse_closed_manifest_projection(attributes)
+        workflow_id = projection["workflow"]["workflow_id"]
+        family = attributes["agentops.workflow.family"]
+        schema = attributes["agentops.family.schema"]
+        _require(
+            family == workflow_id and schema == f"{family}@1",
+            "Manifest Workflow family mismatch",
+        )
     family = attributes.get("agentops.workflow.family")
     schema = attributes.get("agentops.family.schema")
-    if event_name not in {"sampling.decision", "task.binding"}:
+    if event_name != "sampling.decision":
         _require(
-            (family, schema)
-            in {("implementation", "implementation@1"), ("system-design", "system-design@1")},
+            isinstance(family, str) and schema == f"{family}@1",
             "family/schema mismatch",
         )
-    if event_name == "implementation.summary":
-        _require(schema == "implementation@1", "family-specific EventName mismatch")
-    if event_name == "system_design.summary":
-        _require(schema == "system-design@1", "family-specific EventName mismatch")
     if event_name == "usage" and attributes["agentops.usage.kind"] == "money":
         _require(
             re.fullmatch(r"[A-Z]{3}", attributes["agentops.usage.unit"]) is not None,
@@ -812,7 +861,7 @@ def _validate_event(record: dict[str, Any], attributes: dict[str, Any]) -> None:
         }
         if attributes["agentops.review.lens"] == "FRESH_READER":
             _require(
-                schema == "system-design@1" and fresh_reader_fields <= set(attributes),
+                fresh_reader_fields <= set(attributes),
                 "incomplete Fresh Reader summary",
             )
         else:

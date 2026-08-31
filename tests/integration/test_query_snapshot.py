@@ -149,7 +149,9 @@ def task_binding_record(
         "agentops.delivery.id": delivery_id,
         "agentops.task.id": "task-1",
         "agentops.manifest.digest": manifest_digest,
+        "agentops.workflow.family": "workflow.implementation",
         "agentops.event.id": f"task-binding-{sha256(delivery_id.encode()).hexdigest()[:24]}",
+        "agentops.family.schema": "workflow.implementation@1",
         "agentops.delivery.manifest_projection": projection,
         "agentops.delivery.manifest_projection_digest": sha256(projection.encode()).hexdigest(),
     }

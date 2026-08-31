@@ -98,11 +98,13 @@ def task_binding_log() -> LogRecord:
             _kv("agentops.delivery.id", "delivery-1"),
             _kv("agentops.task.id", "task-1"),
             _kv("agentops.manifest.digest", "a" * 64),
+            _kv("agentops.workflow.family", "workflow.implementation"),
             _kv(
                 "agentops.event.id",
                 f"task-binding-{sha256(b'delivery-1').hexdigest()[:24]}",
             ),
             _kv("agentops.task.display_name", "Token tuning"),
+            _kv("agentops.family.schema", "workflow.implementation@1"),
             _kv("agentops.delivery.manifest_projection", projection),
             _kv(
                 "agentops.delivery.manifest_projection_digest",
