@@ -57,7 +57,8 @@ def finding_record(*, event_id: str = "event-1", target_id: str = "artifact-1") 
 
 
 def task_binding_record(
-    *, display_name: str | None = "Token tuning", task_id: str = "task-1"
+    *, display_name: str | None = "Token tuning", task_id: str = "task-1",
+    workflow_id: str = "hello-world-workflow",
 ) -> dict[str, Any]:
     roles: list[dict[str, str]] = []
     projection = {
@@ -66,10 +67,10 @@ def task_binding_record(
         "task_id": task_id,
         "manifest_digest": "a" * 64,
         "workflow": {
-            "package_name": "implementation",
+            "package_name": workflow_id,
             "exact_package_version": "2.0.0",
             "package_digest": f"sha256:{'b' * 64}",
-            "workflow_id": "workflow.implementation",
+            "workflow_id": workflow_id,
             "workflow_version": "2.0.0",
             "snapshot_id": "snapshot.implementation.2",
             "snapshot_digest": f"sha256:{'c' * 64}",
@@ -86,6 +87,8 @@ def task_binding_record(
         "agentops.task.id": task_id,
         "agentops.manifest.digest": "a" * 64,
         "agentops.event.id": f"task-binding-{sha256(b'delivery-1').hexdigest()[:24]}",
+        "agentops.workflow.family": workflow_id,
+        "agentops.family.schema": f"{workflow_id}@1",
         "agentops.delivery.manifest_projection": projection_json,
         "agentops.delivery.manifest_projection_digest": sha256(
             projection_json.encode()
@@ -184,6 +187,19 @@ def test_profile_two_accepts_task_binding_and_requires_direct_delivery_on_every_
     for invalid_task_id in ("task id", "?task", "a" * 129):
         with pytest.raises(ValidationError, match=r"task id|agentops\.task\.id"):
             validate_record(task_binding_record(task_id=invalid_task_id))
+
+
+def test_task_binding_family_comes_from_the_manifest_workflow_without_an_allowlist() -> None:
+    validated = validate_record(task_binding_record(workflow_id="hello-world-workflow"))
+
+    assert validated.attributes["agentops.workflow.family"] == "hello-world-workflow"
+    assert validated.attributes["agentops.family.schema"] == "hello-world-workflow@1"
+
+    mismatched = task_binding_record(workflow_id="hello-world-workflow")
+    mismatched["attributes"]["agentops.workflow.family"] = "implementation-workflow"
+    mismatched["attributes"]["agentops.family.schema"] = "implementation-workflow@1"
+    with pytest.raises(ValidationError, match="Manifest Workflow family"):
+        validate_record(mismatched)
 
 
 def test_task_binding_projects_atomic_identity_membership_guard_and_optional_name() -> None:
@@ -375,7 +391,7 @@ def test_task_binding_persists_its_exact_profile_coordinate() -> None:
     assert values[3] == "2.0.0"
 
 
-def test_family_specific_summary_and_fresh_reader_shapes_are_closed() -> None:
+def test_event_shapes_are_closed_without_a_workflow_family_allowlist() -> None:
     implementation = {
         "profile_version": "1.0.0",
         "record_type": "event",
@@ -388,8 +404,8 @@ def test_family_specific_summary_and_fresh_reader_shapes_are_closed() -> None:
         },
         "attributes": {
             "agentops.event.id": "implementation-1",
-            "agentops.workflow.family": "system-design",
-            "agentops.family.schema": "system-design@1",
+            "agentops.workflow.family": "hello-world-workflow",
+            "agentops.family.schema": "hello-world-workflow@1",
             "agentops.summary.state": "FINAL",
             "agentops.artifact.id": "report-1",
             "agentops.artifact.digest": "a" * 64,
@@ -401,8 +417,15 @@ def test_family_specific_summary_and_fresh_reader_shapes_are_closed() -> None:
             "agentops.coverage.format": "coverage-json",
         },
     }
-    with pytest.raises(ValidationError, match="family-specific EventName"):
-        validate_record(implementation)
+    assert (
+        validate_record(implementation).attributes["agentops.workflow.family"]
+        == "hello-world-workflow"
+    )
+
+    mismatched = deepcopy(implementation)
+    mismatched["attributes"]["agentops.family.schema"] = "different-workflow@1"
+    with pytest.raises(ValidationError, match="family/schema mismatch"):
+        validate_record(mismatched)
 
     fresh_reader = finding_record()
     fresh_reader["event_name"] = "review.summary"

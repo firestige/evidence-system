@@ -142,7 +142,6 @@ FIELD_TYPES = {
     **{name: "number" for name in NUMBER_FIELDS},
 }
 ENUMS = {
-    "agentops.workflow.family": {"implementation", "system-design"},
     "agentops.delivery.outcome": {"COMPLETED", "INCOMPLETE", "FAILED", "CANCELLED", "START_FAILED"},
     "agentops.summary.state": {"FINAL", "LOWER_BOUND", "NOT_APPLICABLE", "UNAVAILABLE"},
     "agentops.review.lens": {
@@ -165,7 +164,6 @@ ENUMS = {
     },
     "agentops.usage.source": {"runtime", "provider"},
     "agentops.sampling.decision": {"RECORD_AND_SAMPLE", "DROP"},
-    "agentops.family.schema": {"implementation@1", "system-design@1"},
     "agentops.finding.target.kind": {"ARTIFACT", "SECTION", "COMPONENT", "REQUIREMENT"},
     "agentops.coverage.dimension": {"line", "branch", "function"},
     "agentops.fresh_reader.result": {"PASS", "FINDINGS_REPORTED"},
@@ -180,10 +178,10 @@ def _set(value: str) -> set[str]:
 EVENT_RULES = {
     "task.binding": (
         _set(
-            "agentops.delivery.id agentops.task.id agentops.manifest.digest agentops.event.id agentops.task.display_name agentops.delivery.manifest_projection agentops.delivery.manifest_projection_digest"
+            "agentops.delivery.id agentops.task.id agentops.manifest.digest agentops.workflow.family agentops.event.id agentops.task.display_name agentops.family.schema agentops.delivery.manifest_projection agentops.delivery.manifest_projection_digest"
         ),
         _set(
-            "agentops.delivery.id agentops.task.id agentops.manifest.digest agentops.event.id agentops.delivery.manifest_projection agentops.delivery.manifest_projection_digest"
+            "agentops.delivery.id agentops.task.id agentops.manifest.digest agentops.workflow.family agentops.event.id agentops.family.schema agentops.delivery.manifest_projection agentops.delivery.manifest_projection_digest"
         ),
     ),
     "delivery.summary": (
@@ -400,6 +398,18 @@ def _validate_attributes(attributes: dict[str, Any]) -> None:
             _require(math.isfinite(value), f"non-finite {name}")
         if name in ENUMS:
             _require(value in ENUMS[name], f"invalid enum for {name}")
+        if name == "agentops.workflow.family":
+            _require(
+                isinstance(value, str) and IDENTIFIER.fullmatch(value) is not None,
+                "invalid Workflow family",
+            )
+        if name == "agentops.family.schema":
+            _require(
+                isinstance(value, str)
+                and value.endswith("@1")
+                and IDENTIFIER.fullmatch(value[:-2]) is not None,
+                "invalid Workflow family schema",
+            )
         if name in {
             "agentops.manifest.digest",
             "agentops.artifact.digest",
@@ -760,19 +770,21 @@ def _validate_event(record: dict[str, Any], attributes: dict[str, Any]) -> None:
             "task-binding-" + sha256(attributes["agentops.delivery.id"].encode()).hexdigest()[:24]
         )
         _require(attributes["agentops.event.id"] == expected_event_id, "unstable task binding id")
-        _parse_closed_manifest_projection(attributes)
+        projection = _parse_closed_manifest_projection(attributes)
+        workflow_id = projection["workflow"]["workflow_id"]
+        family = attributes["agentops.workflow.family"]
+        schema = attributes["agentops.family.schema"]
+        _require(
+            family == workflow_id and schema == f"{family}@1",
+            "Manifest Workflow family mismatch",
+        )
     family = attributes.get("agentops.workflow.family")
     schema = attributes.get("agentops.family.schema")
-    if event_name not in {"sampling.decision", "task.binding"}:
+    if event_name != "sampling.decision":
         _require(
-            (family, schema)
-            in {("implementation", "implementation@1"), ("system-design", "system-design@1")},
+            isinstance(family, str) and schema == f"{family}@1",
             "family/schema mismatch",
         )
-    if event_name == "implementation.summary":
-        _require(schema == "implementation@1", "family-specific EventName mismatch")
-    if event_name == "system_design.summary":
-        _require(schema == "system-design@1", "family-specific EventName mismatch")
     if event_name == "usage" and attributes["agentops.usage.kind"] == "money":
         _require(
             re.fullmatch(r"[A-Z]{3}", attributes["agentops.usage.unit"]) is not None,
@@ -812,7 +824,7 @@ def _validate_event(record: dict[str, Any], attributes: dict[str, Any]) -> None:
         }
         if attributes["agentops.review.lens"] == "FRESH_READER":
             _require(
-                schema == "system-design@1" and fresh_reader_fields <= set(attributes),
+                fresh_reader_fields <= set(attributes),
                 "incomplete Fresh Reader summary",
             )
         else:
