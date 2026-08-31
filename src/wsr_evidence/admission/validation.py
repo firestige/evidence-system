@@ -576,8 +576,7 @@ def _parse_closed_manifest_projection(attributes: dict[str, Any]) -> dict[str, A
         )
         _require(
             isinstance(role["agent_provider_descriptor_digest"], str)
-            and PREFIXED_DIGEST.fullmatch(role["agent_provider_descriptor_digest"])
-            is not None,
+            and PREFIXED_DIGEST.fullmatch(role["agent_provider_descriptor_digest"]) is not None,
             "invalid Agent Provider descriptor digest",
         )
         capabilities = role["required_capabilities"]
@@ -585,8 +584,7 @@ def _parse_closed_manifest_projection(attributes: dict[str, Any]) -> dict[str, A
             isinstance(capabilities, list)
             and len(capabilities) > 0
             and all(
-                isinstance(capability, str)
-                and IDENTIFIER.fullmatch(capability) is not None
+                isinstance(capability, str) and IDENTIFIER.fullmatch(capability) is not None
                 for capability in capabilities
             )
             and capabilities == sorted(set(capabilities)),

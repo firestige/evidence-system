@@ -57,7 +57,9 @@ def finding_record(*, event_id: str = "event-1", target_id: str = "artifact-1") 
 
 
 def task_binding_record(
-    *, display_name: str | None = "Token tuning", task_id: str = "task-1",
+    *,
+    display_name: str | None = "Token tuning",
+    task_id: str = "task-1",
     workflow_id: str = "hello-world-workflow",
 ) -> dict[str, Any]:
     roles: list[dict[str, str]] = []
@@ -226,9 +228,7 @@ def test_task_binding_accepts_the_complete_frozen_provider_role_projection() -> 
             "agent_provider_id": resolved_role["agentProviderId"],
             "agent_provider_version": resolved_role["agentProviderVersion"],
             "agent_provider_adapter_key": resolved_role["agentProviderAdapterKey"],
-            "agent_provider_descriptor_digest": resolved_role[
-                "agentProviderDescriptorDigest"
-            ],
+            "agent_provider_descriptor_digest": resolved_role["agentProviderDescriptorDigest"],
             "required_capabilities": resolved_role["requiredCapabilities"],
             "model_provider_id": resolved_role["modelProviderId"],
             "model_id": resolved_role["modelId"],
@@ -343,26 +343,26 @@ def test_task_binding_accepts_present_repository_and_exact_sorted_role_map() -> 
         {
             "role_id": "role.reviewer",
             "role_prompt_identity": "prompt.role.reviewer",
-                "role_prompt_digest": f"sha256:{'d' * 64}",
-                "agent_provider_id": "provider.dsh",
-                "agent_provider_version": "1.2.3",
-                "agent_provider_adapter_key": "dsh-sdk",
-                "agent_provider_descriptor_digest": f"sha256:{'1' * 64}",
-                "required_capabilities": ["structured-completion"],
-                "model_provider_id": "deepseek-official",
+            "role_prompt_digest": f"sha256:{'d' * 64}",
+            "agent_provider_id": "provider.dsh",
+            "agent_provider_version": "1.2.3",
+            "agent_provider_adapter_key": "dsh-sdk",
+            "agent_provider_descriptor_digest": f"sha256:{'1' * 64}",
+            "required_capabilities": ["structured-completion"],
+            "model_provider_id": "deepseek-official",
             "model_id": "deepseek-chat",
             "resolution_source": "EXECUTION_DEFAULT",
         },
         {
             "role_id": "role.writer",
             "role_prompt_identity": "prompt.role.writer",
-                "role_prompt_digest": f"sha256:{'e' * 64}",
-                "agent_provider_id": "provider.dsh",
-                "agent_provider_version": "1.2.3",
-                "agent_provider_adapter_key": "dsh-sdk",
-                "agent_provider_descriptor_digest": f"sha256:{'1' * 64}",
-                "required_capabilities": ["structured-completion"],
-                "model_provider_id": "deepseek-official",
+            "role_prompt_digest": f"sha256:{'e' * 64}",
+            "agent_provider_id": "provider.dsh",
+            "agent_provider_version": "1.2.3",
+            "agent_provider_adapter_key": "dsh-sdk",
+            "agent_provider_descriptor_digest": f"sha256:{'1' * 64}",
+            "required_capabilities": ["structured-completion"],
+            "model_provider_id": "deepseek-official",
             "model_id": "deepseek-reasoner",
             "resolution_source": "REPOSITORY",
         },
@@ -371,15 +371,13 @@ def test_task_binding_accepts_present_repository_and_exact_sorted_role_map() -> 
         {
             "roleId": role["role_id"],
             "rolePromptIdentity": role["role_prompt_identity"],
-                "rolePromptDigest": role["role_prompt_digest"],
-                "agentProviderId": role["agent_provider_id"],
-                "agentProviderVersion": role["agent_provider_version"],
-                "agentProviderAdapterKey": role["agent_provider_adapter_key"],
-                "agentProviderDescriptorDigest": role[
-                    "agent_provider_descriptor_digest"
-                ],
-                "requiredCapabilities": role["required_capabilities"],
-                "modelProviderId": role["model_provider_id"],
+            "rolePromptDigest": role["role_prompt_digest"],
+            "agentProviderId": role["agent_provider_id"],
+            "agentProviderVersion": role["agent_provider_version"],
+            "agentProviderAdapterKey": role["agent_provider_adapter_key"],
+            "agentProviderDescriptorDigest": role["agent_provider_descriptor_digest"],
+            "requiredCapabilities": role["required_capabilities"],
+            "modelProviderId": role["model_provider_id"],
             "modelId": role["model_id"],
             "resolutionSource": role["resolution_source"],
         }
