@@ -66,7 +66,7 @@ def create_app(
             if storage is not None:
                 await storage.close()
 
-    app = FastAPI(title="wsr-evidence", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="wsr-evidence", version="0.1.1", lifespan=lifespan)
     app.add_exception_handler(StarletteHTTPException, query_transport_error)  # type: ignore[arg-type]
     app.include_router(router)
     if otlp_ingestor is not None:
