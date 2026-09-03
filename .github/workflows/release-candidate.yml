@@ -201,7 +201,8 @@ jobs:
         run: |
           uv run python -m release.cli.release build \
             "$RUNNER_TEMP/local-release" "$(cat "$RUNNER_TEMP/oci-digest")"
-          for NAME in wsr_evidence-0.1.0-py3-none-any.whl wsr_evidence-0.1.0.tar.gz; do
+          VERSION="$(uv run python -m release.cli.release verify "$RUNNER_TEMP/local-release" | jq -er .version)"
+          for NAME in "wsr_evidence-${VERSION}-py3-none-any.whl" "wsr_evidence-${VERSION}.tar.gz"; do
             EXPECTED="$(jq -er --arg name "$NAME" '.evidence.assets[] | select(.name == $name) | .sha256' "$GITHUB_WORKSPACE/$AUTHORITY_MANIFEST")"
             ACTUAL="sha256:$(sha256sum "$RUNNER_TEMP/local-release/$NAME" | cut -d' ' -f1)"
             test "$ACTUAL" = "$EXPECTED"
