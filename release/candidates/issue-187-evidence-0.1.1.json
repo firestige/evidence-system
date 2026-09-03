@@ -1,0 +1,59 @@
+{
+  "schema_version": "wsr.evidence-immutable-candidate@1.0.0",
+  "status": "IMMUTABLE_RELEASE_CANDIDATE",
+  "created_at": "2026-09-04",
+  "candidate_tag": "0.1.1-rc.1",
+  "evidence": {
+    "version": "0.1.1",
+    "payload_commit": "7f585c0c367c7d7ef27189bd79d061d600392930",
+    "candidate_archive_commit": "effc9a271728532009a6d3316fce0b529bfeee3f",
+    "publisher_base_commit": "effc9a271728532009a6d3316fce0b529bfeee3f",
+    "migration_revision": "20260828_0004"
+  },
+  "pinned_inputs": {
+    "system_contracts_commit": "a3f6d7ca8a3e08e89af4bc3ecea34524f5094bd5",
+    "contract_publication_record_sha256": "sha256:feb0186da48661d2663b03d20e536f470b591ea22f21a34a4ca99bfcc33204e9"
+  },
+  "contract": {
+    "coordinate": "evidence.query@0.1.0",
+    "status": "FROZEN",
+    "published": true,
+    "conformance_claim": "VALIDATOR_ONLY",
+    "semantic_sha256": "sha256:ce13b76cb3c2737e8243c97de880574060a61c05a6a7a67182a2804c04a2a8ef"
+  },
+  "deployment": {
+    "target": "local-compose-loopback-only",
+    "api_binding": "127.0.0.1:4318",
+    "postgres_host_port": null,
+    "presentation_services": [],
+    "compose_sha256": "sha256:877a2a0ffdb2fa5c6eed2367d31faf6ecd14d84a7177f76208a462138ba34cc4",
+    "smoke_sha256": "sha256:9305f2f346b38dd2c3813c4747562fd0fb8a37b8d8fdddbbdc47032217ff0aba"
+  },
+  "assets": [
+    {
+      "name": "wsr_evidence-0.1.1-py3-none-any.whl",
+      "bytes": 56065,
+      "sha256": "sha256:00a8c4999ae82333792944dbbd5a86e6d9660fd6340bd6d858d0ccfa31dcffbe"
+    },
+    {
+      "name": "wsr_evidence-0.1.1.tar.gz",
+      "bytes": 44236,
+      "sha256": "sha256:4f0fa78625c4e4776c71ba1f3cf518fce5fb1931400323a09c19196eeacd3e3d"
+    }
+  ],
+  "gates": {
+    "python_3_13_3_14_compatibility": "PASS",
+    "python_3_14_unit": "PASS_151",
+    "lint_type_build": "PASS",
+    "postgresql_integration": "PASS",
+    "container": "PASS",
+    "task_binding_dynamic_family": "PASS",
+    "contract_frozen_authority": "PASS"
+  },
+  "non_claims": [
+    "NO_EVIDENCE_TAG_OR_GITHUB_RELEASE_CREATED",
+    "NO_EVIDENCE_REGISTRY_OR_GHCR_PUBLICATION_CREATED",
+    "NO_STABLE_COMPONENT_OR_SUPERPROJECT_PUBLICATION_CREATED",
+    "NO_NEW_EVIDENCE_BEHAVIOR_IMPLEMENTED_FOR_ISSUE_187"
+  ]
+}
