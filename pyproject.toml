@@ -1,6 +1,6 @@
 [project]
 name = "wsr-evidence"
-version = "0.1.0"
+version = "0.1.1"
 description = "Loopback-only OTLP evidence data service for workflow-self-recursive"
 readme = "README.md"
 requires-python = ">=3.13,<3.15"
