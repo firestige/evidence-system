@@ -90,6 +90,8 @@ def test_workflows_separate_product_authority_from_publisher_and_scope_release_i
     promote = (ROOT / ".github/workflows/release-promote.yml").read_text()
     ci = (ROOT / ".github/workflows/ci.yml").read_text()
     dockerfile = (ROOT / "deployment/Dockerfile").read_text()
+    image_validator = (ROOT / "release/validate_image_qualification.py").read_text()
+    trigger_gate = (ROOT / "release/cli/verify-trigger.sh").read_text()
 
     assert "repository: firestige/workflow-self-recursive" in candidate
     assert "path: evidence-product" in candidate
@@ -123,18 +125,23 @@ def test_workflows_separate_product_authority_from_publisher_and_scope_release_i
     assert "release/request.json" in candidate
     assert "steps.request.outputs.candidate_tag" in candidate
     assert "docker buildx imagetools inspect" in candidate
-    assert "org.opencontainers.image.revision" in candidate
+    assert "org.opencontainers.image.revision" in image_validator
     assert "ARG WSR_RELEASE_REVISION" in dockerfile
     assert "org.opencontainers.image.revision=$WSR_RELEASE_REVISION" in dockerfile
-    assert "workflow_call:" in candidate
-    assert 'test "$GITHUB_REF_NAME" = "release/next"' in candidate
-    assert "workflow_dispatch:" in ci
-    assert "release_candidate:" in ci
-    assert "authority_ref:" in ci
-    assert "authority_manifest:" in ci
-    assert "uses: ./.github/workflows/release-candidate.yml" in ci
-    assert "secrets: inherit" in ci
-    assert "actions/create-github-app-token@" in promote
+    assert "workflow_call:" not in candidate
+    assert "workflow_dispatch:" not in candidate
+    assert "release/cli/verify-trigger.sh" in candidate
+    assert "push:release/next" in trigger_gate
+    assert "release_candidate:" not in ci
+    assert "uses: ./.github/workflows/release-candidate.yml" not in ci
+    assert "actions/create-github-app-token@v3" in promote
+    assert "client-id: ${{ vars.WSR_RELEASE_CLIENT_ID }}" in promote
+    assert "app-id:" not in promote
+    assert "actions/create-github-app-token@v3" in candidate
+    assert "client-id: ${{ vars.WSR_RELEASE_CLIENT_ID }}" in candidate
+    assert "app-id:" not in candidate
+    assert "docker/setup-buildx-action@v4" in candidate
+    assert "docker/setup-buildx-action@v3" not in candidate
     assert promote.index("actions/create-github-app-token@") > promote.index(
         "Verify qualified assets"
     )

@@ -5,7 +5,7 @@ event=${GITHUB_EVENT_NAME:?GITHUB_EVENT_NAME is required}
 ref=${GITHUB_REF_NAME:?GITHUB_REF_NAME is required}
 
 case "$event:$ref" in
-  push:release/next | workflow_dispatch:main)
+  push:release/next)
     exit 0
     ;;
   *)
