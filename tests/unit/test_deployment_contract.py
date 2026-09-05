@@ -60,7 +60,7 @@ def test_release_image_is_multi_platform_and_emits_build_provenance() -> None:
 
 def test_release_trigger_gate_has_a_closed_event_and_ref_truth_table() -> None:
     gate = ROOT / "release" / "cli" / "verify-trigger.sh"
-    allowed = {("push", "release/next"), ("workflow_dispatch", "main")}
+    allowed = {("push", "release/next")}
     events = ("push", "workflow_dispatch", "pull_request", "workflow_call")
     refs = ("release/next", "main", "feature/untrusted")
 

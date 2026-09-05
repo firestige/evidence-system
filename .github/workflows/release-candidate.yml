@@ -4,31 +4,6 @@ on:
   push:
     branches:
       - release/next
-  workflow_dispatch:
-    inputs:
-      candidate_tag:
-        description: RC tag, for example 0.1.0-rc.1
-        required: true
-        type: string
-      authority_ref:
-        description: Superproject ref containing the frozen Contract and unified candidate manifest
-        required: true
-        type: string
-      authority_manifest:
-        description: Superproject-relative immutable unified candidate manifest
-        required: true
-        type: string
-  workflow_call:
-    inputs:
-      candidate_tag:
-        required: true
-        type: string
-      authority_ref:
-        required: true
-        type: string
-      authority_manifest:
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -57,21 +32,12 @@ jobs:
         id: request
         env:
           GH_TOKEN: ${{ github.token }}
-          DISPATCH_CANDIDATE_TAG: ${{ inputs.candidate_tag }}
-          DISPATCH_AUTHORITY_REF: ${{ inputs.authority_ref }}
-          DISPATCH_AUTHORITY_MANIFEST: ${{ inputs.authority_manifest }}
         run: |
-          if test "$GITHUB_EVENT_NAME" = "push"; then
-            gh api "repos/$GITHUB_REPOSITORY/contents/release/request.json?ref=$GITHUB_SHA" \
-              --jq .content | base64 --decode > "$RUNNER_TEMP/release-request.json"
-            CANDIDATE_TAG="$(jq -er .candidate_tag "$RUNNER_TEMP/release-request.json")"
-            AUTHORITY_REF="$(jq -er .authority_ref "$RUNNER_TEMP/release-request.json")"
-            AUTHORITY_MANIFEST="$(jq -er .authority_manifest "$RUNNER_TEMP/release-request.json")"
-          else
-            CANDIDATE_TAG="$DISPATCH_CANDIDATE_TAG"
-            AUTHORITY_REF="$DISPATCH_AUTHORITY_REF"
-            AUTHORITY_MANIFEST="$DISPATCH_AUTHORITY_MANIFEST"
-          fi
+          gh api "repos/$GITHUB_REPOSITORY/contents/release/request.json?ref=$GITHUB_SHA" \
+            --jq .content | base64 --decode > "$RUNNER_TEMP/release-request.json"
+          CANDIDATE_TAG="$(jq -er .candidate_tag "$RUNNER_TEMP/release-request.json")"
+          AUTHORITY_REF="$(jq -er .authority_ref "$RUNNER_TEMP/release-request.json")"
+          AUTHORITY_MANIFEST="$(jq -er .authority_manifest "$RUNNER_TEMP/release-request.json")"
           test -n "$CANDIDATE_TAG" && test -n "$AUTHORITY_REF" && test -n "$AUTHORITY_MANIFEST"
           echo "candidate_tag=$CANDIDATE_TAG" >> "$GITHUB_OUTPUT"
           echo "authority_ref=$AUTHORITY_REF" >> "$GITHUB_OUTPUT"
@@ -130,7 +96,7 @@ jobs:
           version: 0.11.28
           python-version: "3.14"
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Verify candidate coordinate and resolve resumable RC state
         id: candidate
@@ -210,9 +176,9 @@ jobs:
 
       - name: Mint short-lived release App token after candidate qualification
         id: release-app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ vars.WSR_RELEASE_APP_ID }}
+          client-id: ${{ vars.WSR_RELEASE_CLIENT_ID }}
           private-key: ${{ secrets.WSR_RELEASE_APP_PRIVATE_KEY }}
           owner: firestige
           repositories: wsr-evidence
